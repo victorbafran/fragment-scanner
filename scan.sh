@@ -53,7 +53,10 @@ shift
 
 LABEL="unlabelled"
 TRIALS=5
-TARGET="https://www.gstatic.com/generate_204"
+# Deliberately something with a body. A 204 with no content makes every
+# throughput reading 0, which quietly removes the tie-breaker exactly when
+# candidates all connect and speed is the only thing left to choose on.
+TARGET="https://speed.cloudflare.com/__down?bytes=200000"
 OUT="results.csv"
 MODE=quick
 
@@ -175,7 +178,7 @@ measure() {
         echo "0 0 0"; PID=""; return
     fi
 
-    local ok=0 hs=0 sp=0 line code t s
+    local ok=0 line code t s hs_list="" sp_list=""
     for i in $(seq 1 "$TRIALS"); do
         line=$(curl -s -o /dev/null --max-time 15 \
                     --socks5-hostname "127.0.0.1:${port}" \
@@ -185,17 +188,22 @@ measure() {
         t=$(echo "$line" | awk '{print $2}')
         s=$(echo "$line" | awk '{print $3}')
         case "${code:-000}" in
-            2*|3*) ok=$((ok+1))
-                   hs=$(awk -v a="$hs" -v b="${t:-0}" 'BEGIN{print a+b}')
-                   sp=$(awk -v a="$sp" -v b="${s:-0}" 'BEGIN{print a+b}') ;;
+            2*|3*) ok=$((ok+1)); hs_list="$hs_list ${t:-0}"; sp_list="$sp_list ${s:-0}" ;;
         esac
     done
 
     kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; PID=""
 
     if [ "$ok" -gt 0 ]; then
-        awk -v o="$ok" -v h="$hs" -v s="$sp" 'BEGIN{printf "%d %.3f %.0f", o, h/o, s/o/1024}'
-        echo
+        # Median, not mean. On a one-core box a single slow sample drags an
+        # average far enough to crown the wrong candidate, and the ranking
+        # then reports a difference that is scheduling noise.
+        local hs sp
+        hs=$(echo $hs_list | tr ' ' '\n' | grep . | sort -n \
+             | awk '{v[NR]=$1} END{print (NR%2)?v[(NR+1)/2]:(v[NR/2]+v[NR/2+1])/2}')
+        sp=$(echo $sp_list | tr ' ' '\n' | grep . | sort -n \
+             | awk '{v[NR]=$1} END{m=(NR%2)?v[(NR+1)/2]:(v[NR/2]+v[NR/2+1])/2; printf "%.0f", m/1024}')
+        printf '%d %.3f %s\n' "$ok" "$hs" "$sp"
     else
         echo "0 0 0"
     fi
@@ -204,6 +212,9 @@ measure() {
 record() {
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$LABEL,$HOST,$1,$2,$3,$4,$5,$TRIALS,$6,$7" >> "$OUT"
 }
+
+SEEN_MIN=99
+SEEN_MAX=-1
 
 sweep() {
     local which="$1"; shift
@@ -221,6 +232,8 @@ sweep() {
         spv=$(echo "$r" | awk '{print $3}')
         printf '  %-10s %-8s %-9s %-8s %s\n' "$v" "$ok" "$hsv" "$spv" \
                "$([ "$ok" = "0" ] && echo BLOCKED)"
+        [ "$ok" -lt "$SEEN_MIN" ] && SEEN_MIN="$ok"
+        [ "$ok" -gt "$SEEN_MAX" ] && SEEN_MAX="$ok"
         if [ "$ok" -gt "$best_ok" ] || { [ "$ok" = "$best_ok" ] && awk -v a="$hsv" -v b="$best_hs" 'BEGIN{exit !(a<b)}'; }; then
             best_ok="$ok"; best_hs="$hsv"; best_v="$v"
         fi
@@ -271,6 +284,30 @@ fi
 
 echo "=== result for: $LABEL ==="
 echo
+
+# When nothing failed, nothing was learned about which value is better. Saying
+# so is the whole point -- otherwise the winner below looks like a discovery
+# when it was decided by a few hundred milliseconds of scheduling noise.
+if [ "$SEEN_MIN" = "$SEEN_MAX" ] && [ "$SEEN_MIN" = "$TRIALS" ]; then
+    echo "  NO DISCRIMINATION on this network: every candidate passed $TRIALS/$TRIALS."
+    if [ "$BASE_OK" = "0" ]; then
+        echo "  Fragmentation is doing real work here -- unfragmented scored 0/$TRIALS --"
+        echo "  but which values you use makes no measurable difference on this path."
+        echo "  Take the fastest, and re-run where it actually bites: a mobile carrier."
+    else
+        echo "  Unfragmented also passed, so this path is not filtered at all and none"
+        echo "  of these numbers mean anything. Run it from inside the filtered network."
+    fi
+    echo
+elif [ "$SEEN_MAX" = "0" ]; then
+    echo "  EVERY candidate failed, including the baseline. That is not a fragment"
+    echo "  result -- either the endpoint in $CFG is down, or something is blocking"
+    echo "  it wholesale, or xray refused the settings. Check by hand before trusting"
+    echo "  anything above:"
+    echo "    ./xray run -c /tmp/… and read the error, then confirm the config works."
+    echo
+fi
+
 jq -cn --arg pk "$BEST_PACKETS" --arg ln "$BEST_LENGTHS" --arg dl "$BEST_DELAYS" \
     '{tcp:[{type:"fragment",settings:{packets:$pk,lengths:[$ln],delays:[$dl]}}]}'
 echo
