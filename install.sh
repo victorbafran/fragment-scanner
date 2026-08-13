@@ -22,6 +22,11 @@ echo "=== fragment-scanner install ==="
 # other's names for these.
 if [ -n "${PREFIX:-}" ] && [ -d "${PREFIX}/bin" ]; then
     PLATFORM=termux
+    # A fresh Termux has stale package indexes and every install fails until
+    # they are refreshed, which looks like the script being broken.
+    if ! command -v jq > /dev/null 2>&1 || ! command -v unzip > /dev/null 2>&1; then
+        pkg update -y > /dev/null 2>&1 || true
+    fi
     for p in jq curl unzip; do
         command -v "$p" > /dev/null 2>&1 || pkg install -y "$p" > /dev/null 2>&1 || true
     done
