@@ -139,7 +139,10 @@ echo "  trials        : $TRIALS per candidate"
 echo "  results       : $OUT"
 echo
 
-[ -s "$OUT" ] || echo "when,label,host,stage,packets,lengths,delays,ok,trials,handshake_s,kbps" > "$OUT"
+# The endpoint is part of the result, not a detail. Two configs pointed at
+# different servers and SNIs produce rows that are not comparable, and without
+# these columns they sit in the same file looking like they are.
+[ -s "$OUT" ] || echo "when,label,host,server,sni,stage,packets,lengths,delays,ok,trials,handshake_s,kbps" > "$OUT"
 
 # ---------- candidates ----------
 # Ranges rather than fixed numbers, so xray picks randomly inside them and no
@@ -240,7 +243,7 @@ ROWS="$WORK/rows.txt"
 : > "$ROWS"
 
 record() {
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$LABEL,$HOST,$1,$2,$3,$4,$5,$TRIALS,$6,$7" >> "$OUT"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$LABEL,$HOST,$ADDR,$SNI,$1,$2,$3,$4,$5,$TRIALS,$6,$7" >> "$OUT"
     # Kept separately from the CSV because that file accumulates across runs
     # and networks, and the ranking below is only about this one.
     [ "$1" = baseline ] || echo "$2 $3 $4 $5 $6 $7" >> "$ROWS"
