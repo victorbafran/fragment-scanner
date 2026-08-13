@@ -117,12 +117,34 @@ fi
 # On Android in particular this is the difference between "installed fine" and
 # a scanner that cannot start anything, and the blank line reads as success.
 XV=$("$DIR/$BIN" version 2>&1 | head -1)
-if [ -z "$XV" ]; then
-    printf 'ABORT: the xray binary does not run here.\n'
-    printf '  %s\n' "$("$DIR/$BIN" version 2>&1 | head -3 | tr '\n' ' ')"
-    printf '  arch reported: %s, asset used: %s\n' "$ARCH" "$ASSET"
-    exit 1
-fi
+case "$XV" in
+    ''|*e_type*|*"not executable"*|*"cannot execute"*|*"Exec format"*)
+        printf 'ABORT: the xray binary will not run here.\n'
+        printf '  %s\n' "${XV:-no output at all}"
+        printf '  arch reported: %s, asset used: %s\n' "$ARCH" "$ASSET"
+        if [ "$PLATFORM" = termux ]; then
+            cat <<'EOF'
+
+  On Android this is expected, and no download will fix it: Android only
+  runs position-independent executables, and the official Xray builds are
+  not. The error is "unexpected e_type: 2".
+
+  Two ways round it, easiest first:
+
+    1. Turn the phone into a hotspot, connect a laptop to it, and run the
+       scan there. The DPI belongs to the carrier's network, not to the
+       handset, so a tethered machine crosses exactly the same path and
+       measures the same thing. Nothing new to install.
+
+    2. Run a real Linux userland on the phone:
+         pkg install proot-distro
+         proot-distro install debian
+         proot-distro login debian
+       then run this installer again inside it.
+EOF
+        fi
+        exit 1 ;;
+esac
 say "xray     : $XV"
 
 # ---------- the scanner ----------
