@@ -1,5 +1,7 @@
 # fragment-scanner
 
+[راهنمای فارسی](README_FA.md)
+
 Finds the TLS fragment parameters that actually get through the DPI on a given
 network, and prints them in the exact shape a 3x-ui panel wants.
 
