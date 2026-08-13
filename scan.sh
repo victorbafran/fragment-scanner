@@ -53,10 +53,13 @@ shift
 
 LABEL="unlabelled"
 TRIALS=5
-# Deliberately something with a body. A 204 with no content makes every
-# throughput reading 0, which quietly removes the tie-breaker exactly when
-# candidates all connect and speed is the only thing left to choose on.
-TARGET="https://speed.cloudflare.com/__down?bytes=200000"
+# Something with a body, because a 204 with no content makes every throughput
+# reading 0 and removes the tie-breaker exactly when candidates all connect.
+# Kept small on purpose: a large payload over a slow path runs past the curl
+# timeout and gets scored as blocked, which invents failures that are really
+# just bandwidth.
+TARGET="https://speed.cloudflare.com/__down?bytes=50000"
+TIMEOUT=25
 OUT="results.csv"
 MODE=quick
 
@@ -97,7 +100,12 @@ fi
 WORK=$(mktemp -d)
 PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; rm -rf "$WORK"; }
-trap cleanup EXIT INT TERM
+# Interrupt has to exit, not just tidy up. A handler that only cleans leaves
+# the script running with its working directory deleted, and every candidate
+# after that point records as blocked -- a full table of zeroes that reads
+# exactly like total DPI blocking and is really just a stray Ctrl-C.
+trap cleanup EXIT
+trap 'echo; echo "interrupted."; cleanup; exit 130' INT TERM
 
 # ---------- pull the proxy outbound out of the working config ----------
 # Both fragment styles are accepted. The classic one keeps its fragment in a
@@ -184,7 +192,7 @@ measure() {
 
     local ok=0 line code t s hs_list="" sp_list=""
     for i in $(seq 1 "$TRIALS"); do
-        line=$(curl -s -o /dev/null --max-time 15 \
+        line=$(curl -s -o /dev/null --max-time "$TIMEOUT" \
                     --socks5-hostname "127.0.0.1:${port}" \
                     -w '%{http_code} %{time_appconnect} %{speed_download}' \
                     "$TARGET" 2>/dev/null)

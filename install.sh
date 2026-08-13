@@ -113,7 +113,17 @@ if [ ! -x "$DIR/$BIN" ] || ! "$DIR/$BIN" version 2>/dev/null | head -1 | grep -q
     rm -f "$DIR/xray.zip"
     chmod +x "$DIR/$BIN" 2>/dev/null || true
 fi
-say "xray     : $("$DIR/$BIN" version 2>/dev/null | head -1 || echo installed)"
+# Report a binary that will not execute instead of printing an empty line.
+# On Android in particular this is the difference between "installed fine" and
+# a scanner that cannot start anything, and the blank line reads as success.
+XV=$("$DIR/$BIN" version 2>&1 | head -1)
+if [ -z "$XV" ]; then
+    printf 'ABORT: the xray binary does not run here.\n'
+    printf '  %s\n' "$("$DIR/$BIN" version 2>&1 | head -3 | tr '\n' ' ')"
+    printf '  arch reported: %s, asset used: %s\n' "$ARCH" "$ASSET"
+    exit 1
+fi
+say "xray     : $XV"
 
 # ---------- the scanner ----------
 curl -fsSL -o "$DIR/scan.sh" "$REPO/scan.sh" || fail "could not download scan.sh"
