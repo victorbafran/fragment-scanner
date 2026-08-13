@@ -73,6 +73,9 @@ while [ $# -gt 0 ]; do
 done
 
 [ -s "$CFG" ] || { echo "ABORT: no such config: $CFG"; exit 1; }
+# install.sh drops a jq.exe here on Windows, where there is no package manager
+# to put one on PATH.
+[ -x "$HOME/fragment-scanner/jq.exe" ] && PATH="$HOME/fragment-scanner:$PATH"
 for t in jq curl; do
     command -v "$t" > /dev/null || { echo "ABORT: $t is not installed"; exit 1; }
 done
@@ -83,7 +86,8 @@ HOST=$(hostname 2>/dev/null || uname -n 2>/dev/null || echo unknown)
 # Termux installs into $PREFIX, which is why that path is checked too.
 XRAY="${XRAY_BIN:-}"
 if [ -z "$XRAY" ]; then
-    for c in "${PREFIX:-/usr}/bin/xray" ./xray ~/fragment-scanner/xray \
+    for c in ./xray.exe ~/fragment-scanner/xray.exe \
+             "${PREFIX:-/usr}/bin/xray" ./xray ~/fragment-scanner/xray \
              /usr/local/x-ui/bin/xray-linux-amd64 /usr/local/bin/xray /usr/bin/xray; do
         [ -x "$c" ] && { XRAY="$c"; break; }
     done

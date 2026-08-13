@@ -20,7 +20,23 @@ echo "=== fragment-scanner install ==="
 # ---------- packages ----------
 # Termux and Debian want different package managers, and neither has the
 # other's names for these.
-if [ -n "${PREFIX:-}" ] && [ -d "${PREFIX}/bin" ]; then
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) PLATFORM=windows ;;
+    *)                    PLATFORM= ;;
+esac
+
+if [ "$PLATFORM" = windows ]; then
+    # Git Bash has curl and the coreutils this needs, but no jq and no package
+    # manager to get one, so fetch the single-file build.
+    if ! command -v jq > /dev/null 2>&1; then
+        mkdir -p "$HOME/fragment-scanner"
+        curl -fsSL -o "$HOME/fragment-scanner/jq.exe" \
+            https://github.com/jqlang/jq/releases/latest/download/jq-windows-amd64.exe \
+            || fail "could not download jq"
+        PATH="$HOME/fragment-scanner:$PATH"
+        export PATH
+    fi
+elif [ -n "${PREFIX:-}" ] && [ -d "${PREFIX}/bin" ]; then
     PLATFORM=termux
     # A fresh Termux has stale package indexes and every install fails until
     # they are refreshed, which looks like the script being broken.
@@ -63,25 +79,41 @@ XRAY_VERSION="${XRAY_VERSION:-v26.7.28}"
 # The download name differs per architecture, and getting it wrong produces a
 # binary that simply will not execute, with no useful error.
 ARCH=$(uname -m)
-case "$ARCH" in
-    x86_64|amd64)   ASSET=Xray-linux-64.zip    ;;
-    aarch64|arm64)  ASSET=Xray-linux-arm64-v8a.zip ;;
-    armv7l|armv7)   ASSET=Xray-linux-arm32-v7a.zip ;;
-    *) fail "unsupported architecture: $ARCH" ;;
-esac
+BIN=xray
+if [ "$PLATFORM" = windows ]; then
+    ASSET=Xray-windows-64.zip
+    BIN=xray.exe
+else
+    case "$ARCH" in
+        x86_64|amd64)   ASSET=Xray-linux-64.zip    ;;
+        aarch64|arm64)  ASSET=Xray-linux-arm64-v8a.zip ;;
+        armv7l|armv7)   ASSET=Xray-linux-arm32-v7a.zip ;;
+        *) fail "unsupported architecture: $ARCH" ;;
+    esac
+fi
 say "arch     : $ARCH -> $ASSET"
 say "xray ver : $XRAY_VERSION (pinned)"
 
-if [ ! -x "$DIR/xray" ] || ! "$DIR/xray" version 2>/dev/null | head -1 | grep -q "${XRAY_VERSION#v}"; then
+if [ ! -x "$DIR/$BIN" ] || ! "$DIR/$BIN" version 2>/dev/null | head -1 | grep -q "${XRAY_VERSION#v}"; then
     say "fetching xray..."
     curl -fsSL -o "$DIR/xray.zip" \
         "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/$ASSET" \
         || fail "could not download xray ${XRAY_VERSION}"
-    unzip -oq "$DIR/xray.zip" xray -d "$DIR" || fail "could not unpack xray"
+    if command -v unzip > /dev/null 2>&1; then
+        unzip -oq "$DIR/xray.zip" "$BIN" -d "$DIR" || fail "could not unpack xray"
+    else
+        # Git Bash ships no unzip; PowerShell is always there on Windows.
+        powershell -NoProfile -Command \
+            "Add-Type -A System.IO.Compression.FileSystem; \
+             [IO.Compression.ZipFile]::OpenRead('$(cygpath -w "$DIR/xray.zip" 2>/dev/null || echo "$DIR/xray.zip")').Entries \
+             | Where-Object { \$_.Name -eq '$BIN' } \
+             | ForEach-Object { [IO.Compression.ZipFileExtensions]::ExtractToFile(\$_, '$(cygpath -w "$DIR/$BIN" 2>/dev/null || echo "$DIR/$BIN")', \$true) }" \
+            || fail "could not unpack xray"
+    fi
     rm -f "$DIR/xray.zip"
-    chmod +x "$DIR/xray"
+    chmod +x "$DIR/$BIN" 2>/dev/null || true
 fi
-say "xray     : $("$DIR/xray" version 2>/dev/null | head -1 || echo installed)"
+say "xray     : $("$DIR/$BIN" version 2>/dev/null | head -1 || echo installed)"
 
 # ---------- the scanner ----------
 curl -fsSL -o "$DIR/scan.sh" "$REPO/scan.sh" || fail "could not download scan.sh"
