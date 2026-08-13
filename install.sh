@@ -43,6 +43,18 @@ done
 mkdir -p "$DIR"
 
 # ---------- xray ----------
+# Pinned, not "latest". Xray's latest *stable* release is v26.3.27, which
+# predates the plural lengths/delays form of the fragment mask. 3x-ui emits
+# exactly that form, and a core without it refuses to start with
+#
+#   infra/conf: LengthMin can't be 0
+#
+# which surfaces as every candidate looking blocked -- a scan full of zeroes
+# that reads like DPI and is really a version mismatch. Measured on a real
+# box: identical settings, 0/3 on 26.3.27 and 204 OK on 26.7.28. Pin to a
+# core that has the feature, and match what the panel itself runs.
+XRAY_VERSION="${XRAY_VERSION:-v26.7.28}"
+
 # The download name differs per architecture, and getting it wrong produces a
 # binary that simply will not execute, with no useful error.
 ARCH=$(uname -m)
@@ -53,12 +65,13 @@ case "$ARCH" in
     *) fail "unsupported architecture: $ARCH" ;;
 esac
 say "arch     : $ARCH -> $ASSET"
+say "xray ver : $XRAY_VERSION (pinned)"
 
-if [ ! -x "$DIR/xray" ]; then
+if [ ! -x "$DIR/xray" ] || ! "$DIR/xray" version 2>/dev/null | head -1 | grep -q "${XRAY_VERSION#v}"; then
     say "fetching xray..."
     curl -fsSL -o "$DIR/xray.zip" \
-        "https://github.com/XTLS/Xray-core/releases/latest/download/$ASSET" \
-        || fail "could not download xray"
+        "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/$ASSET" \
+        || fail "could not download xray ${XRAY_VERSION}"
     unzip -oq "$DIR/xray.zip" xray -d "$DIR" || fail "could not unpack xray"
     rm -f "$DIR/xray.zip"
     chmod +x "$DIR/xray"
