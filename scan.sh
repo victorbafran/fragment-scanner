@@ -8,6 +8,8 @@
 #     --target URL     what to fetch through the proxy
 #     --out FILE       append results as CSV (default results.csv)
 #     --full           also test length/delay pairs after the staged sweep
+#     --mask JSON      measure this exact finalmask instead of sweeping;
+#                      inline or a file path, repeatable to compare several
 #
 # WHERE TO RUN IT
 #
@@ -63,6 +65,7 @@ TIMEOUT=25
 OUT="results.csv"
 MODE=quick
 
+MASKS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --label)  LABEL="$2"; shift ;;
@@ -70,6 +73,9 @@ while [ $# -gt 0 ]; do
         --target) TARGET="$2"; shift ;;
         --out)    OUT="$2"; shift ;;
         --full)   MODE=full ;;
+        # Repeatable. Each is a whole finalmask object, inline or a file path,
+        # e.g. --mask '{"tcp":[{"type":"fragment","settings":{...}}]}'
+        --mask)   MASKS="${MASKS}${MASKS:+$'\n'}$2"; MODE=compare; shift ;;
         *) echo "unknown option: $1"; exit 1 ;;
     esac
     shift
@@ -159,13 +165,13 @@ free_port() {
     done
 }
 
-# measure <packets> <lengths> <delays> -> "ok handshake kbps"
-measure() {
-    local packets="$1" lengths="$2" delays="$3"
+# run_mask <finalmask-json|null> -> "ok handshake kbps"
+# Takes a whole finalmask object rather than three loose values, so a mask
+# crafted by hand -- several masks chained, multi-entry lengths, maxSplit --
+# can be measured on the same footing as the swept candidates.
+run_mask() {
+    local fm="$1"
     local port; port=$(free_port)
-    local fm='null'
-    [ -n "$packets" ] && fm=$(jq -cn --arg pk "$packets" --arg ln "$lengths" --arg dl "$delays" \
-        '{tcp:[{type:"fragment",settings:{packets:$pk,lengths:[$ln],delays:[$dl]}}]}')
 
     jq -n --argjson proxy "$PROXY" --argjson port "$port" --argjson fm "$fm" '{
         log: { loglevel: "error" },
@@ -219,6 +225,15 @@ measure() {
     else
         echo "0 0 0"
     fi
+}
+
+# measure <packets> <lengths> <delays> -> "ok handshake kbps"
+# An empty packets argument means no fragmentation at all -- the baseline.
+measure() {
+    local fm='null'
+    [ -n "$1" ] && fm=$(jq -cn --arg pk "$1" --arg ln "$2" --arg dl "$3" \
+        '{tcp:[{type:"fragment",settings:{packets:$pk,lengths:[$ln],delays:[$dl]}}]}')
+    run_mask "$fm"
 }
 
 ROWS="$WORK/rows.txt"
@@ -281,6 +296,39 @@ if [ "$BASE_OK" = "$TRIALS" ]; then
     echo "  meant to test. Every result below will look fine and prove nothing."
 fi
 echo
+
+if [ "$MODE" = compare ]; then
+    # Hand-written masks are measured as they are, with no sweep. This is how
+    # a shape the sweep cannot express -- several chained masks, multi-entry
+    # lengths, maxSplit -- gets compared against anything else on equal terms.
+    echo "--- comparing the supplied masks ---"
+    printf '  %-4s %-8s %-9s %-8s %s\n' "#" "ok/$TRIALS" "hs(s)" "kB/s" "mask"
+    N=0
+    while IFS= read -r m; do
+        [ -n "$m" ] || continue
+        N=$((N+1))
+        if [ -f "$m" ]; then FM=$(jq -c . "$m" 2>/dev/null)
+        else FM=$(printf '%s' "$m" | jq -c . 2>/dev/null); fi
+        if [ -z "$FM" ]; then
+            printf '  %-4s %s\n' "$N" "not valid JSON, skipped: $m"
+            continue
+        fi
+        r=$(run_mask "$FM")
+        ok=$(echo "$r" | awk '{print $1}')
+        hsv=$(echo "$r" | awk '{print $2}')
+        spv=$(echo "$r" | awk '{print $3}')
+        printf '  %-4s %-8s %-9s %-8s %s\n' "$N" "$ok" "$hsv" "$spv" \
+               "$([ "$ok" = 0 ] && echo 'BLOCKED  ')$FM"
+        record mask "mask${N}" - - "$ok" "$hsv" "$spv"
+    done <<< "$MASKS"
+    echo
+    echo "  the baseline above is the control: if it also passed, this path is"
+    echo "  not filtered and none of these numbers separate anything."
+    echo "  rows are in the order given, not ranked -- with a handful of masks"
+    echo "  the ordering would be latency noise more often than a real result."
+    echo "SCAN_DONE"
+    exit 0
+fi
 
 sweep packets $PACKETS_LIST
 sweep lengths $LENGTHS_LIST
