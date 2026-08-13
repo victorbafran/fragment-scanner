@@ -1,0 +1,7 @@
+# These are fetched straight onto Linux and Android and run as shell scripts.
+# A CRLF line ending makes bash fail with "\r: command not found", which reads
+# like a broken script rather than a line-ending problem, so pin them to LF
+# regardless of what platform commits them.
+*.sh text eol=lf
+install.sh text eol=lf
+*.md text eol=lf

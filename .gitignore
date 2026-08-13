@@ -1,0 +1,6 @@
+working.json
+*.json
+!package.json
+results.csv
+xray
+*.zip
