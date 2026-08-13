@@ -221,8 +221,14 @@ measure() {
     fi
 }
 
+ROWS="$WORK/rows.txt"
+: > "$ROWS"
+
 record() {
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$LABEL,$HOST,$1,$2,$3,$4,$5,$TRIALS,$6,$7" >> "$OUT"
+    # Kept separately from the CSV because that file accumulates across runs
+    # and networks, and the ranking below is only about this one.
+    [ "$1" = baseline ] || echo "$2 $3 $4 $5 $6 $7" >> "$ROWS"
 }
 
 SEEN_MIN=99
@@ -293,6 +299,33 @@ if [ "$MODE" = "full" ]; then
     done
     echo
 fi
+
+# ---------- every candidate, best first ----------
+# The staged sweep only reports a winner per stage, which hides the second and
+# third choices. Those matter: when the top few tie on success the pick is
+# partly noise, and a filter that shifts next week may leave one of the
+# runners-up working when the winner stops.
+echo "=== all candidates, best first ==="
+printf '  %-4s %-10s %-9s %-8s %-8s %-9s %s\n' "#" "packets" "lengths" "delays" "ok/$TRIALS" "hs(s)" "kB/s"
+RANK=0
+while read -r pk ln dl ok hs sp; do
+    [ -n "${pk:-}" ] || continue
+    RANK=$((RANK+1))
+    printf '  %-4s %-10s %-9s %-8s %-8s %-9s %s\n' "$RANK" "$pk" "$ln" "$dl" "$ok" "$hs" "$sp"
+done < <(sort -k4,4nr -k5,5n -k6,6nr "$ROWS" 2>/dev/null)
+echo
+echo "  ranked on success rate first, then the faster handshake, then throughput."
+echo "  rows differ in one parameter at a time -- the sweep is staged, not a"
+echo "  full cross product -- so read this as a shortlist, not a league table."
+echo
+echo "  the top three, ready to paste:"
+sort -k4,4nr -k5,5n -k6,6nr "$ROWS" 2>/dev/null | head -3 | while read -r pk ln dl _ _ _; do
+    [ -n "${pk:-}" ] || continue
+    printf '    '
+    jq -cn --arg pk "$pk" --arg ln "$ln" --arg dl "$dl" \
+        '{tcp:[{type:"fragment",settings:{packets:$pk,lengths:[$ln],delays:[$dl]}}]}'
+done
+echo
 
 echo "=== result for: $LABEL ==="
 echo
