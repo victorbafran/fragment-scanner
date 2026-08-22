@@ -191,8 +191,20 @@ echo "  $COUNT probed, $(grep -c . "$PROBED" 2>/dev/null || echo 0) answered"
 [ -s "$PROBED" ] || { echo; echo "  Nothing answered. This network blocks the range on 443, or you are offline."; exit 1; }
 
 if [ "$MAX_LATENCY" != "0" ]; then
+    FASTEST=$(sort -k2,2n "$PROBED" | head -1 | awk '{print $2}')
     awk -v m="$MAX_LATENCY" '$2 <= m' "$PROBED" > "$WORK/f" && mv "$WORK/f" "$PROBED"
-    echo "  $(grep -c . "$PROBED") within ${MAX_LATENCY}ms"
+    KEPT=$(grep -c . "$PROBED" 2>/dev/null || echo 0)
+    echo "  $KEPT within ${MAX_LATENCY}ms"
+    # Without this the run dies two passes later complaining about the test
+    # host, which is not what went wrong and sends you looking in the wrong
+    # place. The filter is applied here, so it explains itself here.
+    if [ "$KEPT" = "0" ]; then
+        echo
+        echo "  --max-latency ${MAX_LATENCY} removed every address. The quickest"
+        echo "  handshake on this network was ${FASTEST}ms, so nothing could qualify."
+        echo "  Raise it above that, or drop the option and read the times first."
+        exit 1
+    fi
 fi
 
 # ---------- pass 2: does it front the host at all ----------
