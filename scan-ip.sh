@@ -9,8 +9,14 @@
 #     --top N            how many survivors get the speed test (default 15)
 #     --trials N         repeats per survivor (default 2)
 #     --size BYTES       download size per trial (default 200000)
-#     --min-speed KB     only report addresses at or above this, in kB/s
-#     --max-latency MS   only report addresses at or below this connect time
+#     --min-speed KB     download bar, in kB/s. Set by measuring the line
+#                        unless you give a number here
+#     --min-upload KB    upload bar, in kB/s. Implies --upload
+#     --share PCT        how much of the line's own speed an address has to
+#                        reach when the bars are set automatically (default 60)
+#     --no-auto          do not measure the line, do not set any bar
+#     --max-latency MS   drop addresses whose handshake is slower than this,
+#                        before the speed test rather than after
 #     --upload           measure upload as well as download
 #     --parallel N       concurrent probes in the first pass (default 40)
 #     --host NAME        the Cloudflare-fronted host used for the test
@@ -56,9 +62,12 @@ SAMPLE=40
 TOP=15
 TRIALS=2
 SIZE=200000
-MIN_SPEED=0
+MIN_SPEED=""
+MIN_UPLOAD=""
 MAX_LATENCY=0
 UPLOAD=0
+AUTO=1
+SHARE=60
 PARALLEL=40
 OUT="ips.csv"
 RANGES=""
@@ -80,17 +89,65 @@ DEFAULT_RANGES="104.16.0.0/13
 198.41.128.0/17
 197.234.240.0/22"
 
+# ---------- settings file ----------
+# Read before the command line so a flag still wins. Parsed rather than
+# sourced: a hand-edited file should not be able to run anything, and a
+# misspelled name should be pointed out instead of silently ignored.
+CONF=""
+PREV_ARG=""
+for a in "$@"; do [ "$PREV_ARG" = "--conf" ] && CONF="$a"; PREV_ARG="$a"; done
+[ -n "$CONF" ] || for c in ./settings.conf ~/fragment-scanner/settings.conf; do
+    [ -f "$c" ] && { CONF="$c"; break; }
+done
+
+load_conf() {
+    local f="$1" line k v
+    [ -f "$f" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line=$(printf '%s' "$line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -n "$line" ] || continue
+        case "$line" in *=*) : ;; *) continue ;; esac
+        k=$(printf '%s' "${line%%=*}" | tr -d '[:space:]')
+        v=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
+        [ -n "$v" ] || continue
+        case "$k" in
+            label)       LABEL="$v" ;;
+            sample)      SAMPLE="$v" ;;
+            top)         TOP="$v" ;;
+            trials)      TRIALS="$v" ;;
+            size)        SIZE="$v" ;;
+            parallel)    PARALLEL="$v" ;;
+            share)       SHARE="$v" ;;
+            min_speed)   MIN_SPEED="$v"; AUTO=0 ;;
+            min_upload)  MIN_UPLOAD="$v"; UPLOAD=1; AUTO=0 ;;
+            max_latency) MAX_LATENCY="$v" ;;
+            upload)      case "$v" in yes|true|1) UPLOAD=1 ;; esac ;;
+            auto)        case "$v" in no|false|0) AUTO=0 ;; esac ;;
+            host)        HOSTNAME_TEST="$v" ;;
+            ranges_file) [ -f "$v" ] && RANGES="$v" ;;
+            out)         OUT="$v" ;;
+            *) echo "note: unknown setting '$k' in $f, ignored" >&2 ;;
+        esac
+    done < "$f"
+}
+load_conf "$CONF"
+
 while [ $# -gt 0 ]; do
     case "$1" in
+        --conf)        shift ;;
         --label)       LABEL="$2"; shift ;;
         --ranges)      RANGES="$2"; shift ;;
         --sample)      SAMPLE="$2"; shift ;;
         --top)         TOP="$2"; shift ;;
         --trials)      TRIALS="$2"; shift ;;
         --size)        SIZE="$2"; shift ;;
-        --min-speed)   MIN_SPEED="$2"; shift ;;
+        --min-speed)   MIN_SPEED="$2"; AUTO=0; shift ;;
+        --min-upload)  MIN_UPLOAD="$2"; UPLOAD=1; AUTO=0; shift ;;
         --max-latency) MAX_LATENCY="$2"; shift ;;
         --upload)      UPLOAD=1 ;;
+        --share)       SHARE="$2"; shift ;;
+        --no-auto)     AUTO=0 ;;
         --parallel)    PARALLEL="$2"; shift ;;
         --host)        HOSTNAME_TEST="$2"; shift ;;
         --via)         VIA="$2"; shift ;;
@@ -137,23 +194,74 @@ if [ -n "$VIA" ]; then
     fi
 fi
 
+[ -n "$RANGES" ] || for r in ./ranges.txt ~/fragment-scanner/ranges.txt; do
+    [ -f "$r" ] && { RANGES="$r"; break; }
+done
 if [ -n "$RANGES" ]; then
-    if [ -f "$RANGES" ]; then RANGE_LIST=$(grep -vE '^\s*(#|$)' "$RANGES")
-    else RANGE_LIST=$(printf '%s' "$RANGES" | tr ',' '\n' | tr -d ' ' | grep .); fi
+    if [ -f "$RANGES" ]; then
+        RANGE_LIST=$(sed 's/#.*//' "$RANGES" | tr -d '\r' | grep -oE '[0-9.]+/[0-9]+')
+        RANGE_SRC="$RANGES"
+    else
+        RANGE_LIST=$(printf '%s' "$RANGES" | tr ',' '\n' | tr -d ' ' | grep .)
+        RANGE_SRC="the command line"
+    fi
 else
     RANGE_LIST="$DEFAULT_RANGES"
+    RANGE_SRC="built-in defaults"
 fi
+[ -n "$RANGE_LIST" ] || { echo "ABORT: no usable CIDR found in ${RANGE_SRC}"; exit 1; }
 
 echo "=== clean address scan ==="
 echo "  network label : $LABEL"
 echo "  test host     : $HOSTNAME_TEST"
 echo "  measuring     : $([ -n "$VIA" ] && echo "through $VIA" || echo "directly")"
-echo "  ranges        : $(printf '%s\n' "$RANGE_LIST" | grep -c .)"
+echo "  settings from : ${CONF:-built-in defaults}"
+echo "  ranges        : $(printf '%s\n' "$RANGE_LIST" | grep -c .) from ${RANGE_SRC}"
 echo "  probing       : $SAMPLE per range, $PARALLEL at a time"
 echo "  speed test on : top $TOP, $TRIALS runs of $SIZE bytes"
 echo
 
 [ -s "$OUT" ] || echo "when,label,address,connect_ms,down_kbps,up_kbps" > "$OUT"
+
+# ---------- calibrate against the line itself ----------
+# A fixed threshold is meaningless without knowing what the line can do. On a
+# 1 MB/s connection a limit set for a fast one rejects everything and the run
+# looks like it found nothing, when really nothing could have qualified. So
+# measure the line first, unfiltered and unpinned, and set the bar as a share
+# of what it actually manages.
+if [ "$AUTO" = "1" ]; then
+    echo "--- calibrating against this line ---"
+    CAL_D=0; CAL_U=0; CAL_N=0
+    for i in 1 2; do
+        v=$(curl -k -s -o /dev/null --max-time 30 -w '%{http_code} %{speed_download}' \
+                 "https://${HOSTNAME_TEST}${DOWNPATH}${SIZE}" 2>/dev/null)
+        case "$(echo "$v" | awk '{print $1}')" in
+            2*|3*) CAL_N=$((CAL_N+1))
+                   CAL_D=$(awk -v a="$CAL_D" -v b="$(echo "$v" | awk '{print $2}')" 'BEGIN{print a+b}') ;;
+        esac
+    done
+    if [ "$UPLOAD" = "1" ]; then
+        v=$(head -c "$SIZE" /dev/zero | curl -k -s -o /dev/null --max-time 30 \
+                -X POST --data-binary @- -w '%{speed_upload}' \
+                "https://${HOSTNAME_TEST}${UPPATH}" 2>/dev/null)
+        CAL_U=$(awk -v b="${v:-0}" 'BEGIN{printf "%.0f", b/1024}')
+    fi
+    if [ "$CAL_N" -gt 0 ]; then
+        LINE_D=$(awk -v d="$CAL_D" -v n="$CAL_N" 'BEGIN{printf "%.0f", d/n/1024}')
+        MIN_SPEED=$(awk -v l="$LINE_D" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
+        echo "  this line does about ${LINE_D} kB/s down"
+        [ "$UPLOAD" = "1" ] && { MIN_UPLOAD=$(awk -v l="$CAL_U" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
+                                 echo "  and about ${CAL_U} kB/s up"; }
+        echo "  so an address has to reach ${MIN_SPEED} kB/s${MIN_UPLOAD:+ down and ${MIN_UPLOAD} kB/s up} (${SHARE}% of it) to be worth reporting"
+    else
+        echo "  could not reach $HOSTNAME_TEST directly, so no bar is set"
+        MIN_SPEED=0
+    fi
+    echo
+fi
+MIN_SPEED="${MIN_SPEED:-0}"
+MIN_UPLOAD="${MIN_UPLOAD:-0}"
+
 
 rand_ip_in() {
     local cidr="$1" ip bits a b c d base size off n
@@ -314,15 +422,29 @@ done < "$WORK/short.txt"
 
 echo
 FINAL="$WORK/final.txt"
-awk -v s="$MIN_SPEED" '$3 >= s && $3 > 0' "$RESULTS" | sort -k3,3nr > "$FINAL"
+awk -v s="$MIN_SPEED" -v u="$MIN_UPLOAD" '$3 >= s && $3 > 0 && $4 >= u' "$RESULTS" \
+    | sort -k3,3nr > "$FINAL"
 if [ ! -s "$FINAL" ]; then
     echo "=== nothing qualified ==="
-    if [ "$MIN_SPEED" != "0" ]; then
-        echo "  Nothing reached ${MIN_SPEED} kB/s. Fastest was $(sort -k3,3nr "$RESULTS" | head -1 | awk '{print $3" kB/s at "$1}')."
-        echo "  Lower --min-speed, or raise --top so more addresses are tried."
+    BEST_D=$(sort -k3,3nr "$RESULTS" | head -1 | awk '{print $3}')
+    BEST_U=$(sort -k4,4nr "$RESULTS" | head -1 | awk '{print $4}')
+    if [ "${BEST_D:-0}" = "0" ]; then
+        echo "  Addresses served the host but carried no data at all. Raise --trials,"
+        echo "  or try a different --host."
     else
-        echo "  Addresses served the host but carried no data. Raise --trials, or"
-        echo "  try a different --host."
+        # Name the threshold that actually bit, and the number that would have
+        # passed. Otherwise the only way to find out is to guess and re-run.
+        [ "$MIN_SPEED" != "0" ] && [ "$BEST_D" -lt "$MIN_SPEED" ] 2>/dev/null && \
+            echo "  Best download was ${BEST_D} kB/s, under the ${MIN_SPEED} kB/s bar."
+        [ "$MIN_UPLOAD" != "0" ] && [ "${BEST_U:-0}" -lt "$MIN_UPLOAD" ] 2>/dev/null && \
+            echo "  Best upload was ${BEST_U:-0} kB/s, under the ${MIN_UPLOAD} kB/s bar."
+        if [ "$AUTO" = "1" ]; then
+            echo "  Those bars came from measuring this line, at ${SHARE}% of what it"
+            echo "  managed. If the line itself was busy during calibration the bar is"
+            echo "  too high -- lower it with --share 40, or set --min-speed by hand."
+        else
+            echo "  Lower the threshold, or raise --top so more addresses are tried."
+        fi
     fi
     exit 1
 fi

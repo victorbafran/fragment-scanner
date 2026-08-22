@@ -36,8 +36,19 @@ the form.
 ## Finding a clean Cloudflare address
 
 ```sh
-./scan-ip.sh --label irancell --min-speed 100
+cfip
 ```
+
+Settings live in `settings.conf` and the ranges in `ranges.txt`, both plain
+text, both yours, neither overwritten on reinstall. Anything on the command
+line still wins over the file.
+
+By default it measures the line first and sets the bar at a share of what that
+line actually manages. A fixed threshold is meaningless without it: 200 kB/s is
+a good result on one connection and a failure on another, which is how a scan
+ends up reporting nothing on a slow line and looking broken. `--share` moves
+the fraction, `--min-speed` and `--min-upload` replace it with numbers of your
+own, in kilobytes per second.
 
 Samples random addresses from Cloudflare's ranges, keeps the ones that answer,
 drops the ones that do not actually front the test host, and measures download

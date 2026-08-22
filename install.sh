@@ -152,17 +152,55 @@ curl -fsSL -o "$DIR/scan.sh"    "$REPO/scan.sh"    || fail "could not download s
 curl -fsSL -o "$DIR/scan-ip.sh" "$REPO/scan-ip.sh" || fail "could not download scan-ip.sh"
 chmod +x "$DIR/scan.sh" "$DIR/scan-ip.sh"
 
+# These two are yours to edit, so an upgrade must never overwrite them.
+for f in settings.conf ranges.txt; do
+    if [ -f "$DIR/$f" ]; then
+        say "kept     : $f (yours, left alone)"
+    else
+        curl -fsSL -o "$DIR/$f" "$REPO/$f" || fail "could not download $f"
+        say "wrote    : $f"
+    fi
+done
+
+# ---------- one word to start it ----------
+# Aliases rather than something on PATH: they work the same on Git Bash,
+# Termux and a server, and they are one line to remove.
+RC="$HOME/.bashrc"
+if [ -f "$RC" ] || touch "$RC" 2>/dev/null; then
+    if ! grep -q 'fragment-scanner aliases' "$RC" 2>/dev/null; then
+        cat >> "$RC" <<EOF
+
+# fragment-scanner aliases
+alias cfip='cd $DIR && ./scan-ip.sh'
+alias cffrag='cd $DIR && ./scan.sh working.json'
+EOF
+        say "added    : cfip and cffrag to .bashrc"
+    else
+        say "aliases  : already in .bashrc"
+    fi
+fi
+
 cat <<EOF
 
 installed to $DIR
 
-next:
-  1. put a config that already works on this network in $DIR/working.json
-  2. run it, naming the network you are on:
+open a new terminal, or run:  source ~/.bashrc
 
-       cd $DIR && ./scan.sh working.json --label irancell
+then, to find a fast Cloudflare address:
 
-Run it once per network -- mobile carrier, home line, datacenter -- with a
-different label each time. Results append to results.csv so they can be
-compared afterwards. Running it outside the filtered network measures nothing.
+    cfip
+
+and to find fragment values, after putting a config that already works on
+this network in $DIR/working.json:
+
+    cffrag
+
+Settings live in $DIR/settings.conf and the address ranges in
+$DIR/ranges.txt. Both are plain text, both are yours, and neither is
+overwritten when you reinstall.
+
+Name the network you are on in settings.conf before scanning. Results are
+per network -- an address or a fragment value that is good on one carrier
+can be useless on another -- and running any of this outside the filtered
+network measures nothing at all.
 EOF
