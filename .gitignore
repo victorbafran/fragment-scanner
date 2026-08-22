@@ -1,6 +1,10 @@
 working.json
 *.json
 !package.json
-results.csv
+results*.csv
+ips*.csv
+*.log
 xray
+xray.exe
+jq.exe
 *.zip
