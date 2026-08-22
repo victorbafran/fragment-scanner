@@ -148,8 +148,9 @@ esac
 say "xray     : $XV"
 
 # ---------- the scanner ----------
-curl -fsSL -o "$DIR/scan.sh" "$REPO/scan.sh" || fail "could not download scan.sh"
-chmod +x "$DIR/scan.sh"
+curl -fsSL -o "$DIR/scan.sh"    "$REPO/scan.sh"    || fail "could not download scan.sh"
+curl -fsSL -o "$DIR/scan-ip.sh" "$REPO/scan-ip.sh" || fail "could not download scan-ip.sh"
+chmod +x "$DIR/scan.sh" "$DIR/scan-ip.sh"
 
 cat <<EOF
 

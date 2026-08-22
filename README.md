@@ -33,6 +33,36 @@ Output ends with the value to paste into
 **Panel Settings → Sub Formats → Final Mask**, plus each field spelled out for
 the form.
 
+## Finding a clean Cloudflare address
+
+```sh
+./scan-ip.sh --label irancell --min-speed 100
+```
+
+Samples random addresses from Cloudflare's ranges, keeps the ones that answer,
+drops the ones that do not actually front the test host, and measures download
+(and with `--upload`, upload) on what is left. Prints the fastest, and appends
+everything to `ips.csv`.
+
+`--ranges` takes your own CIDRs, comma-separated or as a file. `--host` picks a
+different Cloudflare-fronted host to measure against. `--max-latency` and
+`--min-speed` filter. `--via <config>` measures through your own tunnel instead
+of directly, which is worth it when your domain is *not* filtered.
+
+The address is pinned with `curl --resolve` while the hostname stays put, so
+the handshake and the Host header still name the real site and only the edge
+changes — same site, different door. Ping is not used: ICMP is deprioritised or
+dropped on many Iranian paths, and Cloudflare is anycast, so a ping time
+describes distance to some edge rather than throughput. The TCP handshake to
+443 is timed instead.
+
+Do not point this at a filtered domain. The block is on the name, not the
+address, so every candidate fails identically and the scan separates nothing.
+Find the address against an unfiltered host, then apply it to your real config.
+
+The method follows [CFScanner](https://github.com/MortezaBashsiz/CFScanner),
+which is the tool this community already trusts for it.
+
 ## Read this before trusting a result
 
 **It must run inside the filtered network.** Run it anywhere else and there is
