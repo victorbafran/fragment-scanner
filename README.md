@@ -55,6 +55,14 @@ drops the ones that do not actually front the test host, and measures download
 (and with `--upload`, upload) on what is left. Prints the fastest, and appends
 everything to `ips.csv`.
 
+The address scan has its own sample config, `ip.json`, kept apart from the
+fragment scanner's `working.json`. Each candidate is dropped into its address
+field and measured through the tunnel, and the calibration runs through the
+tunnel too -- a tunnel never reaches the raw line speed, so a bar built from
+the bare line is one no address can clear. `direct = yes` measures the plain
+Cloudflare edge instead, which is the only thing that works when the config's
+domain is filtered.
+
 `--ranges` takes your own CIDRs, comma-separated or as a file. `--host` picks a
 different Cloudflare-fronted host to measure against. `--max-latency` and
 `--min-speed` filter. `--via <config>` measures through your own tunnel instead

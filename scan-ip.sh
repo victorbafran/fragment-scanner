@@ -75,6 +75,7 @@ HOSTNAME_TEST="speed.cloudflare.com"
 DOWNPATH="/__down?bytes="
 UPPATH="/__up"
 VIA=""
+DIRECT=0
 MASK='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["1-2"],"delays":["0"]}}]}'
 
 # Cloudflare ranges that carry the bulk of its edge and are the ones that turn
@@ -126,6 +127,8 @@ load_conf() {
             auto)        case "$v" in no|false|0) AUTO=0 ;; esac ;;
             host)        HOSTNAME_TEST="$v" ;;
             ranges_file) [ -f "$v" ] && RANGES="$v" ;;
+            config)      [ -f "$v" ] && VIA="$v" ;;
+            direct)      case "$v" in yes|true|1) DIRECT=1 ;; esac ;;
             out)         OUT="$v" ;;
             *) echo "note: unknown setting '$k' in $f, ignored" >&2 ;;
         esac
@@ -150,7 +153,8 @@ while [ $# -gt 0 ]; do
         --no-auto)     AUTO=0 ;;
         --parallel)    PARALLEL="$2"; shift ;;
         --host)        HOSTNAME_TEST="$2"; shift ;;
-        --via)         VIA="$2"; shift ;;
+        --via)         VIA="$2"; DIRECT=0; shift ;;
+        --direct)      DIRECT=1 ;;
         --mask)        MASK="$2"; shift ;;
         --out)         OUT="$2"; shift ;;
         -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
@@ -168,8 +172,18 @@ cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 trap 'echo; echo "interrupted."; cleanup; exit 130' INT TERM
 
-# ---------- through a config, if asked ----------
+# ---------- through a config ----------
+# The address scan runs through its own sample config by default, kept apart
+# from the fragment scanner's working.json so the two never interfere. --direct
+# drops back to measuring the plain Cloudflare edge with no tunnel at all.
+[ "$DIRECT" = "1" ] && VIA=""
+if [ -z "$VIA" ] && [ "$DIRECT" != "1" ]; then
+    for c in ./ip.json ~/fragment-scanner/ip.json; do
+        [ -f "$c" ] && { VIA="$c"; break; }
+    done
+fi
 PROXY=""
+ORIG_ADDR=""
 if [ -n "$VIA" ]; then
     command -v jq > /dev/null || { echo "ABORT: jq is needed for --via"; exit 1; }
     [ -s "$VIA" ] || { echo "ABORT: no such config: $VIA"; exit 1; }
@@ -187,6 +201,7 @@ if [ -n "$VIA" ]; then
                    or .protocol=="vmess" or .protocol=="trojan")][0]
                    | del(.streamSettings.sockopt, .streamSettings.finalmask)' "$VIA")
     [ -n "$PROXY" ] && [ "$PROXY" != "null" ] || { echo "ABORT: no proxy outbound in $VIA"; exit 1; }
+    ORIG_ADDR=$(echo "$PROXY" | jq -r '.settings.vnext[0].address // .settings.address // ""')
     if [ -n "$MASK" ]; then
         MJ=$(printf '%s' "$MASK" | jq -c . 2>/dev/null) || MJ=""
         [ -n "$MJ" ] || { echo "ABORT: --mask is not valid JSON"; exit 1; }
@@ -214,7 +229,7 @@ fi
 echo "=== clean address scan ==="
 echo "  network label : $LABEL"
 echo "  test host     : $HOSTNAME_TEST"
-echo "  measuring     : $([ -n "$VIA" ] && echo "through $VIA" || echo "directly")"
+echo "  measuring     : $([ -n "$VIA" ] && echo "through $VIA -> $ORIG_ADDR" || echo "directly, no tunnel")"
 echo "  settings from : ${CONF:-built-in defaults}"
 echo "  ranges        : $(printf '%s\n' "$RANGE_LIST" | grep -c .) from ${RANGE_SRC}"
 echo "  probing       : $SAMPLE per range, $PARALLEL at a time"
@@ -223,6 +238,36 @@ echo
 
 [ -s "$OUT" ] || echo "when,label,address,connect_ms,down_kbps,up_kbps" > "$OUT"
 
+port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3<&- 2>/dev/null; return 0; }; return 1; }
+free_port() {
+    local p
+    while :; do
+        p=$(( (RANDOM % 40000) + 20000 ))
+        case "$p" in 10808|10809) continue ;; esac
+        port_busy "$p" || { echo "$p"; return; }
+    done
+}
+
+start_via() {
+    local ip="$1" lp; lp=$(free_port)
+    jq -n --argjson proxy "$PROXY" --argjson port "$lp" --arg ip "$ip" '{
+        log:{loglevel:"error"},
+        inbounds:[{port:$port,listen:"127.0.0.1",protocol:"socks",settings:{auth:"noauth",udp:false}}],
+        outbounds:[ ( $proxy | .tag="proxy"
+                      | if .settings.vnext then .settings.vnext[0].address=$ip
+                        else .settings.address=$ip end ),
+                    {protocol:"freedom",tag:"direct"} ]}' > "$WORK/v.json" 2>/dev/null
+    "$XRAY" run -c "$WORK/v.json" > "$WORK/v.log" 2>&1 &
+    PID=$!
+    local i
+    for i in $(seq 1 40); do
+        port_busy "$lp" && { echo "$lp"; return; }
+        kill -0 "$PID" 2>/dev/null || break
+        sleep 0.2
+    done
+    echo ""
+}
+
 # ---------- calibrate against the line itself ----------
 # A fixed threshold is meaningless without knowing what the line can do. On a
 # 1 MB/s connection a limit set for a fast one rejects everything and the run
@@ -230,10 +275,20 @@ echo
 # measure the line first, unfiltered and unpinned, and set the bar as a share
 # of what it actually manages.
 if [ "$AUTO" = "1" ]; then
-    echo "--- calibrating against this line ---"
+    CAL_PX=""
+    if [ -n "$VIA" ]; then
+        # Measure through the tunnel at its own address. A tunnel never reaches
+        # the raw line speed, so calibrating on the bare line sets a bar no
+        # address could clear and the run reports nothing.
+        echo "--- calibrating through the tunnel, at its own address ---"
+        CAL_LP=$(start_via "$ORIG_ADDR")
+        [ -n "$CAL_LP" ] && CAL_PX="--socks5-hostname 127.0.0.1:${CAL_LP}"
+    else
+        echo "--- calibrating against this line ---"
+    fi
     CAL_D=0; CAL_U=0; CAL_N=0
     for i in 1 2; do
-        v=$(curl -k -s -o /dev/null --max-time 30 -w '%{http_code} %{speed_download}' \
+        v=$(curl -k -s -o /dev/null --max-time 30 $CAL_PX -w '%{http_code} %{speed_download}' \
                  "https://${HOSTNAME_TEST}${DOWNPATH}${SIZE}" 2>/dev/null)
         case "$(echo "$v" | awk '{print $1}')" in
             2*|3*) CAL_N=$((CAL_N+1))
@@ -241,11 +296,12 @@ if [ "$AUTO" = "1" ]; then
         esac
     done
     if [ "$UPLOAD" = "1" ]; then
-        v=$(head -c "$SIZE" /dev/zero | curl -k -s -o /dev/null --max-time 30 \
+        v=$(head -c "$SIZE" /dev/zero | curl -k -s -o /dev/null --max-time 30 $CAL_PX \
                 -X POST --data-binary @- -w '%{speed_upload}' \
                 "https://${HOSTNAME_TEST}${UPPATH}" 2>/dev/null)
         CAL_U=$(awk -v b="${v:-0}" 'BEGIN{printf "%.0f", b/1024}')
     fi
+    [ -n "$CAL_PX" ] && { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; PID=""; }
     if [ "$CAL_N" -gt 0 ]; then
         LINE_D=$(awk -v d="$CAL_D" -v n="$CAL_N" 'BEGIN{printf "%.0f", d/n/1024}')
         MIN_SPEED=$(awk -v l="$LINE_D" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
@@ -336,37 +392,6 @@ echo "  $(grep -c . "$FRONTS" 2>/dev/null || echo 0) of them answer for it"
 
 sort -k2,2n "$FRONTS" | head -"$TOP" > "$WORK/short.txt"
 echo
-
-# ---------- pass 3: speed ----------
-port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3<&- 2>/dev/null; return 0; }; return 1; }
-free_port() {
-    local p
-    while :; do
-        p=$(( (RANDOM % 40000) + 20000 ))
-        case "$p" in 10808|10809) continue ;; esac
-        port_busy "$p" || { echo "$p"; return; }
-    done
-}
-
-start_via() {
-    local ip="$1" lp; lp=$(free_port)
-    jq -n --argjson proxy "$PROXY" --argjson port "$lp" --arg ip "$ip" '{
-        log:{loglevel:"error"},
-        inbounds:[{port:$port,listen:"127.0.0.1",protocol:"socks",settings:{auth:"noauth",udp:false}}],
-        outbounds:[ ( $proxy | .tag="proxy"
-                      | if .settings.vnext then .settings.vnext[0].address=$ip
-                        else .settings.address=$ip end ),
-                    {protocol:"freedom",tag:"direct"} ]}' > "$WORK/v.json" 2>/dev/null
-    "$XRAY" run -c "$WORK/v.json" > "$WORK/v.log" 2>&1 &
-    PID=$!
-    local i
-    for i in $(seq 1 40); do
-        port_busy "$lp" && { echo "$lp"; return; }
-        kill -0 "$PID" 2>/dev/null || break
-        sleep 0.2
-    done
-    echo ""
-}
 
 # speed_of <ip> -> "down_kbps up_kbps"
 speed_of() {
