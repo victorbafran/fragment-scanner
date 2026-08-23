@@ -390,7 +390,11 @@ wait
 echo "  $(grep -c . "$FRONTS" 2>/dev/null || echo 0) of them answer for it"
 [ -s "$FRONTS" ] || { echo; echo "  None served the test host. Try --host with a domain you know is on Cloudflare."; exit 1; }
 
-sort -k2,2n "$FRONTS" | head -"$TOP" > "$WORK/short.txt"
+# Not truncated to $TOP here. Some addresses answer, front the host, and still
+# carry nothing through the tunnel, and stopping after a fixed number of
+# attempts would leave you with fewer usable results than you asked for. The
+# loop below keeps going down the list until it has $TOP that actually work.
+sort -k2,2n "$FRONTS" > "$WORK/short.txt"
 echo
 
 # speed_of <ip> -> "down_kbps up_kbps"
@@ -432,10 +436,23 @@ else
     printf '  %-17s %-10s %s\n' "address" "conn(ms)" "down kB/s"
 fi
 RESULTS="$WORK/results.txt"; : > "$RESULTS"
+FOUND=0
+DROPPED=0
 while read -r ip ms; do
     [ -n "${ip:-}" ] || continue
+    [ "$FOUND" -ge "$TOP" ] && break
     r=$(speed_of "$ip")
     dn=$(echo "$r" | awk '{print $1}'); up=$(echo "$r" | awk '{print $2}')
+    # An address that carries nothing is not a slow address, it is a dead one.
+    # Printing it or writing it down only adds noise to a list meant to be
+    # picked from, so it is dropped and the next candidate is tried instead.
+    if [ "${dn:-0}" = "0" ]; then
+        DROPPED=$((DROPPED+1))
+        printf '\r  ...%d unusable so far, still looking' "$DROPPED"
+        continue
+    fi
+    [ "$DROPPED" -gt 0 ] && printf '\r%*s\r' 50 ''
+    FOUND=$((FOUND+1))
     if [ "$UPLOAD" = "1" ]; then
         printf '  %-17s %-10s %-11s %s\n' "$ip" "$ms" "$dn" "$up"
     else
@@ -444,6 +461,9 @@ while read -r ip ms; do
     echo "$ip $ms $dn $up" >> "$RESULTS"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$LABEL,$ip,$ms,$dn,$up" >> "$OUT"
 done < "$WORK/short.txt"
+[ "$DROPPED" -gt 0 ] && printf '\r%*s\r  %d answered but carried nothing, skipped\n' 50 '' "$DROPPED"
+[ "$FOUND" -lt "$TOP" ] && [ "$FOUND" -gt 0 ] && \
+    echo "  ran out of candidates at $FOUND of $TOP -- raise sample in settings.conf"
 
 echo
 FINAL="$WORK/final.txt"
