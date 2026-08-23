@@ -245,7 +245,13 @@ fi
 echo "=== clean address scan ==="
 echo "  network label : $LABEL"
 echo "  test host     : $HOSTNAME_TEST"
-echo "  measuring     : $([ -n "$VIA" ] && echo "through $VIA -> $ORIG_ADDR" || echo "directly, no tunnel")"
+if [ -n "$VIA" ]; then
+    echo "  measuring     : through the tunnel in $VIA"
+    echo "  its address   : ${ORIG_ADDR:-none} -- calibrated against once, then"
+    echo "                  replaced by each candidate in turn"
+else
+    echo "  measuring     : the Cloudflare edge directly, no tunnel"
+fi
 echo "  settings from : ${CONF:-built-in defaults}"
 echo "  ranges        : $(printf '%s\n' "$RANGE_LIST" | grep -c .) from ${RANGE_SRC}"
 echo "  probing       : $SAMPLE per range, $PARALLEL at a time"
