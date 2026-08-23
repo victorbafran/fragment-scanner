@@ -129,6 +129,8 @@ load_conf() {
             upload)      case "$v" in yes|true|1) MEASURE=both ;; esac ;;
             auto)        case "$v" in no|false|0) AUTO=0 ;; esac ;;
             host)        HOSTNAME_TEST="$v" ;;
+            down_path)   DOWNPATH="$v" ;;
+            up_path)     UPPATH="$v" ;;
             ranges_file) [ -f "$v" ] && RANGES="$v" ;;
             config)      [ -f "$v" ] && VIA="$v" ;;
             direct)      case "$v" in yes|true|1) DIRECT=1 ;; esac ;;
@@ -157,6 +159,8 @@ while [ $# -gt 0 ]; do
         --no-auto)     AUTO=0 ;;
         --parallel)    PARALLEL="$2"; shift ;;
         --host)        HOSTNAME_TEST="$2"; shift ;;
+        --down-path)   DOWNPATH="$2"; shift ;;
+        --up-path)     UPPATH="$2"; shift ;;
         --via)         VIA="$2"; DIRECT=0; shift ;;
         --direct)      DIRECT=1 ;;
         --mask)        MASK="$2"; shift ;;
@@ -174,6 +178,20 @@ command -v curl > /dev/null || { echo "ABORT: curl is not installed"; exit 1; }
 # what gets measured, what an address is judged on, and what "carries no
 # traffic" means -- in upload-only mode a zero download is expected, not a
 # fault, and treating it as one would throw away every good address.
+# Only speed.cloudflare.com offers somewhere to POST to. Point --host at an
+# ordinary site and upload cannot be measured at all, so say that rather than
+# silently returning zeros that would then read as dead addresses.
+case "${UPPATH:-}" in
+    ""|-|none)
+        case "$MEASURE" in
+            upload|both)
+                echo "ABORT: ${HOSTNAME_TEST} has no upload endpoint, so measure=${MEASURE}"
+                echo "  cannot work against it. Either set measure = download, or use a"
+                echo "  host that accepts uploads -- speed.cloudflare.com is the usual one."
+                exit 1 ;;
+        esac ;;
+esac
+
 case "$MEASURE" in
     download) DO_DOWN=1; DO_UP=0 ;;
     upload)   DO_DOWN=0; DO_UP=1 ;;
@@ -352,7 +370,7 @@ if true; then
     if [ "$DO_DOWN" = "1" ]; then
       for i in 1 2; do
         v=$(curl -k -s -o /dev/null --max-time 30 $CAL_PX -w '%{http_code} %{speed_download}' \
-                 "https://${HOSTNAME_TEST}${DOWNPATH}${SIZE}" 2>/dev/null)
+                 "$(url_down)" 2>/dev/null)
         case "$(echo "$v" | awk '{print $1}')" in
             2*|3*) CAL_N=$((CAL_N+1))
                    CAL_D=$(awk -v a="$CAL_D" -v b="$(echo "$v" | awk '{print $2}')" 'BEGIN{print a+b}') ;;
@@ -413,6 +431,16 @@ MIN_UPLOAD="${MIN_UPLOAD:-0}"
 # read as a doubled number in the output for a while, and became a hard error
 # the moment one was compared as an integer.
 nlines() { local n; n=$(grep -c . "$1" 2>/dev/null); echo "${n:-0}"; }
+
+# speed.cloudflare.com takes the size in the path; anything else serves a fixed
+# page. Both are fine for ranking addresses against each other, which is all
+# this needs -- but only the first can be asked for a particular size.
+url_down() {
+    case "$DOWNPATH" in
+        *bytes=) echo "https://${HOSTNAME_TEST}${DOWNPATH}${1:-$SIZE}" ;;
+        *)       echo "https://${HOSTNAME_TEST}${DOWNPATH}" ;;
+    esac
+}
 
 rand_ip_in() {
     local cidr="$1" ip bits a b c d base size off n
@@ -487,7 +515,7 @@ while read -r ip ms; do
     [ -n "${ip:-}" ] || continue
     ( curl -k -s --tlsv1.2 --max-time 12 -H "Host: $HOSTNAME_TEST" \
            --resolve "${HOSTNAME_TEST}:443:${ip}" \
-           "https://${HOSTNAME_TEST}${DOWNPATH}10" -o /dev/null \
+           "$(url_down 10)" -o /dev/null \
       && echo "$ip $ms" >> "$FRONTS" ) &
     RUNNING=$((RUNNING+1))
     if [ "$RUNNING" -ge "$FRONT_PAR" ]; then
@@ -526,7 +554,7 @@ speed_of() {
             v=$(curl -k -s -o /dev/null --max-time 25 $px \
                      --resolve "${HOSTNAME_TEST}:443:${ip}" \
                      -w '%{http_code} %{speed_download}' \
-                     "https://${HOSTNAME_TEST}${DOWNPATH}${SIZE}" 2>/dev/null)
+                     "$(url_down)" 2>/dev/null)
             case "$(echo "$v" | awk '{print $1}')" in
                 2*|3*) n=$((n+1)); dn=$(awk -v a="$dn" -v b="$(echo "$v" | awk '{print $2}')" 'BEGIN{print a+b}') ;;
             esac

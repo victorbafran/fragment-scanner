@@ -150,7 +150,8 @@ say "xray     : $XV"
 # ---------- the scanner ----------
 curl -fsSL -o "$DIR/scan.sh"    "$REPO/scan.sh"    || fail "could not download scan.sh"
 curl -fsSL -o "$DIR/scan-ip.sh" "$REPO/scan-ip.sh" || fail "could not download scan-ip.sh"
-chmod +x "$DIR/scan.sh" "$DIR/scan-ip.sh"
+curl -fsSL -o "$DIR/check-host.sh" "$REPO/check-host.sh" || fail "could not download check-host.sh"
+chmod +x "$DIR/scan.sh" "$DIR/scan-ip.sh" "$DIR/check-host.sh"
 
 # These two are yours to edit, so an upgrade must never overwrite them.
 for f in settings.conf ranges.txt; do
