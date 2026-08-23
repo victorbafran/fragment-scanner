@@ -247,8 +247,13 @@ echo "  network label : $LABEL"
 echo "  test host     : $HOSTNAME_TEST"
 if [ -n "$VIA" ]; then
     echo "  measuring     : through the tunnel in $VIA"
-    echo "  its address   : ${ORIG_ADDR:-none} -- calibrated against once, then"
-    echo "                  replaced by each candidate in turn"
+    if [ "$AUTO" = "1" ]; then
+        echo "  its address   : ${ORIG_ADDR:-none} -- calibrated against once, then"
+        echo "                  replaced by each candidate in turn"
+    else
+        echo "  its address   : ${ORIG_ADDR:-none} -- replaced by each candidate,"
+        echo "                  and not used as a reference since the bar is yours"
+    fi
 else
     echo "  measuring     : the Cloudflare edge directly, no tunnel"
 fi
@@ -302,7 +307,12 @@ start_via() {
 # nothing, looking like the addresses are at fault.
 if true; then
     CAL_PX=""
-    if [ -n "$VIA" ]; then
+    # Only calibrate through the tunnel when the bar is being derived from it,
+    # where the two have to be measured the same way or the bar is wrong. With
+    # a bar of your own the figure is only there to show the line was tested,
+    # and going through the config would report whatever edge DNS happened to
+    # pick for it -- one sample of one edge, which says little about the line.
+    if [ -n "$VIA" ] && [ "$AUTO" = "1" ]; then
         # Measure through the tunnel at its own address. A tunnel never reaches
         # the raw line speed, so calibrating on the bare line sets a bar no
         # address could clear and the run reports nothing.
@@ -344,20 +354,16 @@ if true; then
                 echo "  and about ${LINE_U} kB/s up, so the bar is ${MIN_UPLOAD}"; }
             echo "  (${SHARE}% of what this line manages)"
         else
-            [ "$DO_DOWN" = "1" ] && echo "  this line does about ${LINE_D} kB/s down, your bar is ${MIN_SPEED}"
+            [ "$DO_DOWN" = "1" ] && echo "  the line managed about ${LINE_D} kB/s down just now, your bar is ${MIN_SPEED}"
             [ "$DO_UP" = "1" ]   && echo "  and about ${LINE_U} kB/s up, your bar is ${MIN_UPLOAD}"
-            # A bar above what the line itself manages can never be met.
-            IMPOSSIBLE=""
-            [ "$DO_DOWN" = "1" ] && awk -v b="$MIN_SPEED"  -v l="$LINE_D" 'BEGIN{exit !(b>l)}' && IMPOSSIBLE="download"
-            [ "$DO_UP" = "1" ]   && awk -v b="$MIN_UPLOAD" -v l="$LINE_U" 'BEGIN{exit !(b>l)}' && IMPOSSIBLE="${IMPOSSIBLE:+$IMPOSSIBLE and }upload"
-            if [ -n "$IMPOSSIBLE" ]; then
-                echo
-                echo "  ABORT: the $IMPOSSIBLE bar is above what this connection can do at all."
-                echo "  No address can clear it, because the limit is the line and not the edge."
-                echo "  Lower it in settings.conf, or comment it out and let the bar be set"
-                echo "  from the measurement above."
-                exit 1
-            fi
+            # Said, not enforced. This is one sample down one path and the bar
+            # is your decision: if nothing below it is any use to you, there is
+            # no point reporting what is below it either.
+            HIGH=""
+            [ "$DO_DOWN" = "1" ] && awk -v b="$MIN_SPEED"  -v l="$LINE_D" 'BEGIN{exit !(b>l)}' && HIGH="download"
+            [ "$DO_UP" = "1" ]   && awk -v b="$MIN_UPLOAD" -v l="$LINE_U" 'BEGIN{exit !(b>l)}' && HIGH="${HIGH:+$HIGH and }upload"
+            [ -n "$HIGH" ] && \
+                echo "  note: the $HIGH bar is above that reading, so expect few or none"
         fi
     else
         echo "  could not reach $HOSTNAME_TEST directly, so no bar is set"
