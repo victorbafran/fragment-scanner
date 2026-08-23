@@ -296,7 +296,11 @@ start_via() {
 # looks like it found nothing, when really nothing could have qualified. So
 # measure the line first, unfiltered and unpinned, and set the bar as a share
 # of what it actually manages.
-if [ "$AUTO" = "1" ]; then
+# Always run, even when the bars are set by hand. In that case the numbers are
+# not used to set anything -- they are used to catch a bar the line itself
+# cannot reach, which otherwise scans every candidate to the end and reports
+# nothing, looking like the addresses are at fault.
+if true; then
     CAL_PX=""
     if [ -n "$VIA" ]; then
         # Measure through the tunnel at its own address. A tunnel never reaches
@@ -329,16 +333,32 @@ if [ "$AUTO" = "1" ]; then
     fi
     [ -n "$CAL_PX" ] && { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; PID=""; }
     if [ "$CAL_N" -gt 0 ]; then
-        if [ "$DO_DOWN" = "1" ]; then
-            LINE_D=$(awk -v d="$CAL_D" -v n="$CAL_N" 'BEGIN{printf "%.0f", d/n/1024}')
-            MIN_SPEED=$(awk -v l="$LINE_D" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
-            echo "  this line does about ${LINE_D} kB/s down, so the bar is ${MIN_SPEED}"
+        LINE_D=$(awk -v d="$CAL_D" -v n="$CAL_N" 'BEGIN{printf "%.0f", d/n/1024}')
+        LINE_U="$CAL_U"
+        if [ "$AUTO" = "1" ]; then
+            [ "$DO_DOWN" = "1" ] && {
+                MIN_SPEED=$(awk -v l="$LINE_D" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
+                echo "  this line does about ${LINE_D} kB/s down, so the bar is ${MIN_SPEED}"; }
+            [ "$DO_UP" = "1" ] && {
+                MIN_UPLOAD=$(awk -v l="$LINE_U" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
+                echo "  and about ${LINE_U} kB/s up, so the bar is ${MIN_UPLOAD}"; }
+            echo "  (${SHARE}% of what this line manages)"
+        else
+            [ "$DO_DOWN" = "1" ] && echo "  this line does about ${LINE_D} kB/s down, your bar is ${MIN_SPEED}"
+            [ "$DO_UP" = "1" ]   && echo "  and about ${LINE_U} kB/s up, your bar is ${MIN_UPLOAD}"
+            # A bar above what the line itself manages can never be met.
+            IMPOSSIBLE=""
+            [ "$DO_DOWN" = "1" ] && awk -v b="$MIN_SPEED"  -v l="$LINE_D" 'BEGIN{exit !(b>l)}' && IMPOSSIBLE="download"
+            [ "$DO_UP" = "1" ]   && awk -v b="$MIN_UPLOAD" -v l="$LINE_U" 'BEGIN{exit !(b>l)}' && IMPOSSIBLE="${IMPOSSIBLE:+$IMPOSSIBLE and }upload"
+            if [ -n "$IMPOSSIBLE" ]; then
+                echo
+                echo "  ABORT: the $IMPOSSIBLE bar is above what this connection can do at all."
+                echo "  No address can clear it, because the limit is the line and not the edge."
+                echo "  Lower it in settings.conf, or comment it out and let the bar be set"
+                echo "  from the measurement above."
+                exit 1
+            fi
         fi
-        if [ "$DO_UP" = "1" ]; then
-            MIN_UPLOAD=$(awk -v l="$CAL_U" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
-            echo "  and about ${CAL_U} kB/s up, so the bar is ${MIN_UPLOAD}"
-        fi
-        echo "  (${SHARE}% of what this line manages)"
     else
         echo "  could not reach $HOSTNAME_TEST directly, so no bar is set"
         MIN_SPEED=0
@@ -474,6 +494,7 @@ fi
 RESULTS="$WORK/results.txt"; : > "$RESULTS"
 FOUND=0
 DROPPED=0
+SLOW=0
 while read -r ip ms; do
     [ -n "${ip:-}" ] || continue
     [ "$FOUND" -ge "$TOP" ] && break
@@ -487,10 +508,21 @@ while read -r ip ms; do
     if [ "$DO_DOWN" = "1" ]; then KEY="${dn:-0}"; else KEY="${up:-0}"; fi
     if [ "$KEY" = "0" ]; then
         DROPPED=$((DROPPED+1))
-        printf '\r  ...%d unusable so far, still looking' "$DROPPED"
+        printf '\r  ...%d unusable, %d too slow, still looking   ' "$DROPPED" "$SLOW"
         continue
     fi
-    [ "$DROPPED" -gt 0 ] && printf '\r%*s\r' 50 ''
+    # The bar is applied here rather than only at the end, so the table is a
+    # list of addresses you could actually use rather than a log of everything
+    # that was tried.
+    BELOW=0
+    [ "$DO_DOWN" = "1" ] && awk -v a="$dn" -v b="$MIN_SPEED"  'BEGIN{exit !(a<b)}' && BELOW=1
+    [ "$DO_UP" = "1" ]   && awk -v a="$up" -v b="$MIN_UPLOAD" 'BEGIN{exit !(a<b)}' && BELOW=1
+    if [ "$BELOW" = "1" ]; then
+        SLOW=$((SLOW+1))
+        printf '\r  ...%d unusable, %d too slow, still looking   ' "$DROPPED" "$SLOW"
+        continue
+    fi
+    { [ "$DROPPED" -gt 0 ] || [ "$SLOW" -gt 0 ]; } && printf '\r%*s\r' 52 ''
     FOUND=$((FOUND+1))
     if [ "$MEASURE" = both ]; then
         printf '  %-17s %-10s %-11s %s\n' "$ip" "$ms" "$dn" "$up"
@@ -502,7 +534,9 @@ while read -r ip ms; do
     echo "$ip $ms $dn $up" >> "$RESULTS"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$LABEL,$ip,$ms,$dn,$up" >> "$OUT"
 done < "$WORK/short.txt"
-[ "$DROPPED" -gt 0 ] && printf '\r%*s\r  %d answered but carried nothing, skipped\n' 50 '' "$DROPPED"
+{ [ "$DROPPED" -gt 0 ] || [ "$SLOW" -gt 0 ]; } && printf '\r%*s\r' 52 ''
+[ "$DROPPED" -gt 0 ] && echo "  $DROPPED answered but carried nothing, skipped"
+[ "$SLOW" -gt 0 ]    && echo "  $SLOW were under the bar, skipped"
 [ "$FOUND" -lt "$TOP" ] && [ "$FOUND" -gt 0 ] && \
     echo "  ran out of candidates at $FOUND of $TOP -- raise sample in settings.conf"
 
