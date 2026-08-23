@@ -408,6 +408,12 @@ MIN_SPEED="${MIN_SPEED:-0}"
 MIN_UPLOAD="${MIN_UPLOAD:-0}"
 
 
+# grep -c prints 0 and exits non-zero when it matches nothing, so the obvious
+# "|| echo 0" fallback appends a second zero and the result is two lines. It
+# read as a doubled number in the output for a while, and became a hard error
+# the moment one was compared as an integer.
+nlines() { local n; n=$(grep -c . "$1" 2>/dev/null); echo "${n:-0}"; }
+
 rand_ip_in() {
     local cidr="$1" ip bits a b c d base size off n
     ip=${cidr%/*}; bits=${cidr#*/}
@@ -440,13 +446,13 @@ while IFS= read -r cidr; do
     done
 done <<< "$RANGE_LIST"
 wait; echo
-echo "  $COUNT probed, $(grep -c . "$PROBED" 2>/dev/null || echo 0) answered"
+echo "  $COUNT probed, $(nlines "$PROBED") answered"
 [ -s "$PROBED" ] || { echo; echo "  Nothing answered. This network blocks the range on 443, or you are offline."; exit 1; }
 
 if [ "$MAX_LATENCY" != "0" ]; then
     FASTEST=$(sort -k2,2n "$PROBED" | head -1 | awk '{print $2}')
     awk -v m="$MAX_LATENCY" '$2 <= m' "$PROBED" > "$WORK/f" && mv "$WORK/f" "$PROBED"
-    KEPT=$(grep -c . "$PROBED" 2>/dev/null || echo 0)
+    KEPT=$(nlines "$PROBED")
     echo "  $KEPT within ${MAX_LATENCY}ms"
     # Without this the run dies two passes later complaining about the test
     # host, which is not what went wrong and sends you looking in the wrong
@@ -486,14 +492,14 @@ while read -r ip ms; do
     RUNNING=$((RUNNING+1))
     if [ "$RUNNING" -ge "$FRONT_PAR" ]; then
         wait; RUNNING=0
-        [ "$(grep -c . "$FRONTS" 2>/dev/null || echo 0)" -ge "$NEED" ] && break
+        [ "$(nlines "$FRONTS")" -ge "$NEED" ] && break
     fi
 done < "$WORK/byms.txt"
 wait
-echo "  $(grep -c . "$FRONTS" 2>/dev/null || echo 0) of them answer for it"
+echo "  $(nlines "$FRONTS") of them answer for it"
 if [ ! -s "$FRONTS" ]; then
     echo
-    echo "  None served the test host, although $(grep -c . "$PROBED") answered on 443."
+    echo "  None served the test host, although $(nlines "$PROBED") answered on 443."
     echo "  A connection that opens but never completes a TLS request usually means"
     echo "  the checks are crowding each other out rather than anything being"
     echo "  blocked. Lower parallel in settings.conf -- 16 or less on a mobile"
