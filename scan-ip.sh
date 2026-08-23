@@ -388,8 +388,15 @@ if true; then
             HIGH=""
             [ "$DO_DOWN" = "1" ] && awk -v b="$MIN_SPEED"  -v l="$LINE_D" 'BEGIN{exit !(b>l)}' && HIGH="download"
             [ "$DO_UP" = "1" ]   && awk -v b="$MIN_UPLOAD" -v l="$LINE_U" 'BEGIN{exit !(b>l)}' && HIGH="${HIGH:+$HIGH and }upload"
+            # The reading above was taken without the tunnel while the results
+            # below go through it, so they are not comparable and a bar set
+            # from the first will reject everything the second can produce.
+            [ -n "$VIA" ] && {
+                echo "  careful: that was measured WITHOUT the tunnel, and the addresses"
+                echo "  below are measured THROUGH it, which always comes out lower."
+                echo "  Set the bar from a previous run's results, not from this figure."; }
             [ -n "$HIGH" ] && \
-                echo "  note: the $HIGH bar is above that reading, so expect few or none"
+                echo "  note: the $HIGH bar is above even that reading, so expect none"
         fi
     else
         echo "  could not reach $HOSTNAME_TEST directly, so no bar is set"
@@ -537,9 +544,12 @@ while read -r ip ms; do
     # Judged on whatever is being measured. In upload-only mode a zero
     # download is the expected outcome, not a fault.
     if [ "$DO_DOWN" = "1" ]; then KEY="${dn:-0}"; else KEY="${up:-0}"; fi
+    # The in-place counter is for a terminal only. Down a pipe the carriage
+    # returns are kept literally and every result row ends up buried in them.
+    progress() { [ -t 1 ] && printf '\r  ...%d unusable, %d too slow, still looking   ' "$DROPPED" "$SLOW"; return 0; }
     if [ "$KEY" = "0" ]; then
         DROPPED=$((DROPPED+1))
-        printf '\r  ...%d unusable, %d too slow, still looking   ' "$DROPPED" "$SLOW"
+        progress
         continue
     fi
     # The bar is applied here rather than only at the end, so the table is a
@@ -550,10 +560,10 @@ while read -r ip ms; do
     [ "$DO_UP" = "1" ]   && awk -v a="$up" -v b="$MIN_UPLOAD" 'BEGIN{exit !(a<b)}' && BELOW=1
     if [ "$BELOW" = "1" ]; then
         SLOW=$((SLOW+1))
-        printf '\r  ...%d unusable, %d too slow, still looking   ' "$DROPPED" "$SLOW"
+        progress
         continue
     fi
-    { [ "$DROPPED" -gt 0 ] || [ "$SLOW" -gt 0 ]; } && printf '\r%*s\r' 52 ''
+    { [ -t 1 ] && { [ "$DROPPED" -gt 0 ] || [ "$SLOW" -gt 0 ]; }; } && printf '\r%*s\r' 52 ''
     FOUND=$((FOUND+1))
     if [ "$MEASURE" = both ]; then
         printf '  %-17s %-10s %-11s %s\n' "$ip" "$ms" "$dn" "$up"
@@ -565,7 +575,7 @@ while read -r ip ms; do
     echo "$ip $ms $dn $up" >> "$RESULTS"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$LABEL,$ip,$ms,$dn,$up" >> "$OUT"
 done < "$WORK/short.txt"
-{ [ "$DROPPED" -gt 0 ] || [ "$SLOW" -gt 0 ]; } && printf '\r%*s\r' 52 ''
+{ [ -t 1 ] && { [ "$DROPPED" -gt 0 ] || [ "$SLOW" -gt 0 ]; }; } && printf '\r%*s\r' 52 ''
 [ "$DROPPED" -gt 0 ] && echo "  $DROPPED answered but carried nothing, skipped"
 [ "$SLOW" -gt 0 ]    && echo "  $SLOW were under the bar, skipped"
 [ "$FOUND" -lt "$TOP" ] && [ "$FOUND" -gt 0 ] && \
