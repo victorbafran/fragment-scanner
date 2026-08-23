@@ -465,19 +465,41 @@ fi
 # finding that out here costs a fraction of a full download.
 echo "--- checking which of them serve $HOSTNAME_TEST ---"
 FRONTS="$WORK/fronts.txt"; : > "$FRONTS"
+# Far heavier than a TCP connect -- each one is a full TLS handshake -- so it
+# gets its own, much lower concurrency. Run at the probe's rate on a mobile
+# line, all of them share the bandwidth, every one runs past the timeout, and
+# the pass reports that nothing serves the host at all. Serially the same
+# request answers in about two seconds.
+FRONT_PAR="$PARALLEL"
+[ "$FRONT_PAR" -gt 16 ] && FRONT_PAR=16
+# No point checking hundreds when only a few are ever speed-tested. Best
+# connect times first, and stop once there are comfortably enough.
+NEED=$(( TOP * 3 ))
+sort -k2,2n "$PROBED" > "$WORK/byms.txt"
 RUNNING=0
 while read -r ip ms; do
     [ -n "${ip:-}" ] || continue
-    ( curl -k -s --tlsv1.2 --max-time 4 -H "Host: $HOSTNAME_TEST" \
+    ( curl -k -s --tlsv1.2 --max-time 12 -H "Host: $HOSTNAME_TEST" \
            --resolve "${HOSTNAME_TEST}:443:${ip}" \
            "https://${HOSTNAME_TEST}${DOWNPATH}10" -o /dev/null \
       && echo "$ip $ms" >> "$FRONTS" ) &
     RUNNING=$((RUNNING+1))
-    [ "$RUNNING" -ge "$PARALLEL" ] && { wait; RUNNING=0; }
-done < "$PROBED"
+    if [ "$RUNNING" -ge "$FRONT_PAR" ]; then
+        wait; RUNNING=0
+        [ "$(grep -c . "$FRONTS" 2>/dev/null || echo 0)" -ge "$NEED" ] && break
+    fi
+done < "$WORK/byms.txt"
 wait
 echo "  $(grep -c . "$FRONTS" 2>/dev/null || echo 0) of them answer for it"
-[ -s "$FRONTS" ] || { echo; echo "  None served the test host. Try --host with a domain you know is on Cloudflare."; exit 1; }
+if [ ! -s "$FRONTS" ]; then
+    echo
+    echo "  None served the test host, although $(grep -c . "$PROBED") answered on 443."
+    echo "  A connection that opens but never completes a TLS request usually means"
+    echo "  the checks are crowding each other out rather than anything being"
+    echo "  blocked. Lower parallel in settings.conf -- 16 or less on a mobile"
+    echo "  line -- or try --host with another domain you know sits on Cloudflare."
+    exit 1
+fi
 
 # Not truncated to $TOP here. Some addresses answer, front the host, and still
 # carry nothing through the tunnel, and stopping after a fixed number of
