@@ -184,7 +184,18 @@ UPLOAD="$DO_UP"
 
 WORK=$(mktemp -d)
 PID=""
-cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; rm -rf "$WORK"; }
+# Belt as well as braces. Each helper stops the xray it started, but a kill
+# that quietly fails would otherwise leave one running per address scanned,
+# and the terminal then refuses to close because processes are alive under it.
+# Sweeping by config path catches anything the ordinary path missed without
+# touching an xray the user is running for themselves.
+cleanup() {
+    [ -n "${XPID:-}" ] && kill "$XPID" 2>/dev/null
+    [ -n "$PID" ] && kill "$PID" 2>/dev/null
+    pkill -f "$WORK" 2>/dev/null
+    rm -rf "$WORK"
+    return 0
+}
 trap cleanup EXIT
 trap 'echo; echo "interrupted."; cleanup; exit 130' INT TERM
 
@@ -275,24 +286,40 @@ free_port() {
     done
 }
 
+# Sets XPID and XPORT rather than printing the port. Printing meant callers
+# used $( ), which runs the whole thing in a subshell -- so the pid was
+# recorded there and lost on return, and every kill afterwards had nothing to
+# kill. One xray survived per address scanned, and the terminal then refused
+# to close because processes were still running under it.
+XPID=""
+XPORT=""
 start_via() {
-    local ip="$1" lp; lp=$(free_port)
+    local ip="$1" lp i
+    XPID=""; XPORT=""
+    lp=$(free_port)
     jq -n --argjson proxy "$PROXY" --argjson port "$lp" --arg ip "$ip" '{
         log:{loglevel:"error"},
         inbounds:[{port:$port,listen:"127.0.0.1",protocol:"socks",settings:{auth:"noauth",udp:false}}],
         outbounds:[ ( $proxy | .tag="proxy"
                       | if .settings.vnext then .settings.vnext[0].address=$ip
                         else .settings.address=$ip end ),
-                    {protocol:"freedom",tag:"direct"} ]}' > "$WORK/v.json" 2>/dev/null
-    "$XRAY" run -c "$WORK/v.json" > "$WORK/v.log" 2>&1 &
-    PID=$!
-    local i
+                    {protocol:"freedom",tag:"direct"} ]}' > "$WORK/v-${lp}.json" 2>/dev/null
+    "$XRAY" run -c "$WORK/v-${lp}.json" > "$WORK/v.log" 2>&1 &
+    XPID=$!
     for i in $(seq 1 40); do
-        port_busy "$lp" && { echo "$lp"; return; }
-        kill -0 "$PID" 2>/dev/null || break
+        port_busy "$lp" && { XPORT="$lp"; return 0; }
+        kill -0 "$XPID" 2>/dev/null || break
         sleep 0.2
     done
-    echo ""
+    kill "$XPID" 2>/dev/null; wait "$XPID" 2>/dev/null; XPID=""
+    return 1
+}
+
+stop_via() {
+    [ -n "$XPID" ] || return 0
+    kill "$XPID" 2>/dev/null
+    wait "$XPID" 2>/dev/null
+    XPID=""
 }
 
 # ---------- calibrate against the line itself ----------
@@ -317,8 +344,7 @@ if true; then
         # the raw line speed, so calibrating on the bare line sets a bar no
         # address could clear and the run reports nothing.
         echo "--- calibrating through the tunnel, at its own address ---"
-        CAL_LP=$(start_via "$ORIG_ADDR")
-        [ -n "$CAL_LP" ] && CAL_PX="--socks5-hostname 127.0.0.1:${CAL_LP}"
+        start_via "$ORIG_ADDR" && CAL_PX="--socks5-hostname 127.0.0.1:${XPORT}"
     else
         echo "--- calibrating against this line ---"
     fi
@@ -341,7 +367,7 @@ if true; then
                 "https://${HOSTNAME_TEST}${UPPATH}" 2>/dev/null)
         CAL_U=$(awk -v b="${v:-0}" 'BEGIN{printf "%.0f", b/1024}')
     fi
-    [ -n "$CAL_PX" ] && { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; PID=""; }
+    [ -n "$CAL_PX" ] && stop_via
     if [ "$CAL_N" -gt 0 ]; then
         LINE_D=$(awk -v d="$CAL_D" -v n="$CAL_N" 'BEGIN{printf "%.0f", d/n/1024}')
         LINE_U="$CAL_U"
@@ -457,9 +483,8 @@ echo
 speed_of() {
     local ip="$1" px="" lp dn=0 up=0 n=0 i v
     if [ -n "$VIA" ]; then
-        lp=$(start_via "$ip")
-        [ -n "$lp" ] || { PID=""; echo "0 0"; return; }
-        px="--socks5-hostname 127.0.0.1:${lp}"
+        start_via "$ip" || { echo "0 0"; return; }
+        px="--socks5-hostname 127.0.0.1:${XPORT}"
     fi
     for i in $(seq 1 "$TRIALS"); do
         if [ "$DO_DOWN" = "1" ]; then
@@ -480,7 +505,7 @@ speed_of() {
             up=$(awk -v a="$up" -v b="${v:-0}" 'BEGIN{print a+b}')
         fi
     done
-    [ -n "$VIA" ] && { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; PID=""; }
+    stop_via
     if [ "$n" -gt 0 ]; then
         awk -v d="$dn" -v u="$up" -v n="$n" -v t="$TRIALS" 'BEGIN{printf "%.0f %.0f", d/n/1024, u/t/1024}'
         echo

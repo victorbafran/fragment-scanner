@@ -105,7 +105,16 @@ fi
 
 WORK=$(mktemp -d)
 PID=""
-cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; rm -rf "$WORK"; }
+# The sweep by config path is insurance: a kill that quietly fails would leave
+# one xray running per candidate, and the terminal then refuses to close
+# because processes are alive under it. Matching on the temp directory cannot
+# touch an xray the user is running for themselves.
+cleanup() {
+    [ -n "$PID" ] && kill "$PID" 2>/dev/null
+    pkill -f "$WORK" 2>/dev/null
+    rm -rf "$WORK"
+    return 0
+}
 # Interrupt has to exit, not just tidy up. A handler that only cleans leaves
 # the script running with its working directory deleted, and every candidate
 # after that point records as blocked -- a full table of zeroes that reads
