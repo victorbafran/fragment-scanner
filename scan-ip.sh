@@ -66,6 +66,7 @@ MIN_SPEED=""
 MIN_UPLOAD=""
 MAX_LATENCY=0
 UPLOAD=0
+MEASURE=download
 AUTO=1
 SHARE=60
 PARALLEL=40
@@ -121,9 +122,11 @@ load_conf() {
             parallel)    PARALLEL="$v" ;;
             share)       SHARE="$v" ;;
             min_speed)   MIN_SPEED="$v"; AUTO=0 ;;
-            min_upload)  MIN_UPLOAD="$v"; UPLOAD=1; AUTO=0 ;;
+            min_upload)  MIN_UPLOAD="$v"; AUTO=0
+                         case "$MEASURE" in download) MEASURE=both ;; esac ;;
             max_latency) MAX_LATENCY="$v" ;;
-            upload)      case "$v" in yes|true|1) UPLOAD=1 ;; esac ;;
+            measure)     MEASURE="$v" ;;
+            upload)      case "$v" in yes|true|1) MEASURE=both ;; esac ;;
             auto)        case "$v" in no|false|0) AUTO=0 ;; esac ;;
             host)        HOSTNAME_TEST="$v" ;;
             ranges_file) [ -f "$v" ] && RANGES="$v" ;;
@@ -148,7 +151,8 @@ while [ $# -gt 0 ]; do
         --min-speed)   MIN_SPEED="$2"; AUTO=0; shift ;;
         --min-upload)  MIN_UPLOAD="$2"; UPLOAD=1; AUTO=0; shift ;;
         --max-latency) MAX_LATENCY="$2"; shift ;;
-        --upload)      UPLOAD=1 ;;
+        --upload)      MEASURE=both ;;
+        --measure)     MEASURE="$2"; shift ;;
         --share)       SHARE="$2"; shift ;;
         --no-auto)     AUTO=0 ;;
         --parallel)    PARALLEL="$2"; shift ;;
@@ -165,6 +169,18 @@ done
 
 [ -x "$HOME/fragment-scanner/jq.exe" ] && PATH="$HOME/fragment-scanner:$PATH"
 command -v curl > /dev/null || { echo "ABORT: curl is not installed"; exit 1; }
+
+# download | upload | both. Everything downstream keys off these two flags:
+# what gets measured, what an address is judged on, and what "carries no
+# traffic" means -- in upload-only mode a zero download is expected, not a
+# fault, and treating it as one would throw away every good address.
+case "$MEASURE" in
+    download) DO_DOWN=1; DO_UP=0 ;;
+    upload)   DO_DOWN=0; DO_UP=1 ;;
+    both)     DO_DOWN=1; DO_UP=1 ;;
+    *) echo "ABORT: measure must be download, upload or both -- got '$MEASURE'"; exit 1 ;;
+esac
+UPLOAD="$DO_UP"
 
 WORK=$(mktemp -d)
 PID=""
@@ -287,15 +303,19 @@ if [ "$AUTO" = "1" ]; then
         echo "--- calibrating against this line ---"
     fi
     CAL_D=0; CAL_U=0; CAL_N=0
-    for i in 1 2; do
+    if [ "$DO_DOWN" = "1" ]; then
+      for i in 1 2; do
         v=$(curl -k -s -o /dev/null --max-time 30 $CAL_PX -w '%{http_code} %{speed_download}' \
                  "https://${HOSTNAME_TEST}${DOWNPATH}${SIZE}" 2>/dev/null)
         case "$(echo "$v" | awk '{print $1}')" in
             2*|3*) CAL_N=$((CAL_N+1))
                    CAL_D=$(awk -v a="$CAL_D" -v b="$(echo "$v" | awk '{print $2}')" 'BEGIN{print a+b}') ;;
         esac
-    done
-    if [ "$UPLOAD" = "1" ]; then
+      done
+    else
+        CAL_N=1
+    fi
+    if [ "$DO_UP" = "1" ]; then
         v=$(head -c "$SIZE" /dev/zero | curl -k -s -o /dev/null --max-time 30 $CAL_PX \
                 -X POST --data-binary @- -w '%{speed_upload}' \
                 "https://${HOSTNAME_TEST}${UPPATH}" 2>/dev/null)
@@ -303,12 +323,16 @@ if [ "$AUTO" = "1" ]; then
     fi
     [ -n "$CAL_PX" ] && { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; PID=""; }
     if [ "$CAL_N" -gt 0 ]; then
-        LINE_D=$(awk -v d="$CAL_D" -v n="$CAL_N" 'BEGIN{printf "%.0f", d/n/1024}')
-        MIN_SPEED=$(awk -v l="$LINE_D" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
-        echo "  this line does about ${LINE_D} kB/s down"
-        [ "$UPLOAD" = "1" ] && { MIN_UPLOAD=$(awk -v l="$CAL_U" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
-                                 echo "  and about ${CAL_U} kB/s up"; }
-        echo "  so an address has to reach ${MIN_SPEED} kB/s${MIN_UPLOAD:+ down and ${MIN_UPLOAD} kB/s up} (${SHARE}% of it) to be worth reporting"
+        if [ "$DO_DOWN" = "1" ]; then
+            LINE_D=$(awk -v d="$CAL_D" -v n="$CAL_N" 'BEGIN{printf "%.0f", d/n/1024}')
+            MIN_SPEED=$(awk -v l="$LINE_D" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
+            echo "  this line does about ${LINE_D} kB/s down, so the bar is ${MIN_SPEED}"
+        fi
+        if [ "$DO_UP" = "1" ]; then
+            MIN_UPLOAD=$(awk -v l="$CAL_U" -v s="$SHARE" 'BEGIN{printf "%.0f", l*s/100}')
+            echo "  and about ${CAL_U} kB/s up, so the bar is ${MIN_UPLOAD}"
+        fi
+        echo "  (${SHARE}% of what this line manages)"
     else
         echo "  could not reach $HOSTNAME_TEST directly, so no bar is set"
         MIN_SPEED=0
@@ -406,14 +430,18 @@ speed_of() {
         px="--socks5-hostname 127.0.0.1:${lp}"
     fi
     for i in $(seq 1 "$TRIALS"); do
-        v=$(curl -k -s -o /dev/null --max-time 25 $px \
-                 --resolve "${HOSTNAME_TEST}:443:${ip}" \
-                 -w '%{http_code} %{speed_download}' \
-                 "https://${HOSTNAME_TEST}${DOWNPATH}${SIZE}" 2>/dev/null)
-        case "$(echo "$v" | awk '{print $1}')" in
-            2*|3*) n=$((n+1)); dn=$(awk -v a="$dn" -v b="$(echo "$v" | awk '{print $2}')" 'BEGIN{print a+b}') ;;
-        esac
-        if [ "$UPLOAD" = "1" ]; then
+        if [ "$DO_DOWN" = "1" ]; then
+            v=$(curl -k -s -o /dev/null --max-time 25 $px \
+                     --resolve "${HOSTNAME_TEST}:443:${ip}" \
+                     -w '%{http_code} %{speed_download}' \
+                     "https://${HOSTNAME_TEST}${DOWNPATH}${SIZE}" 2>/dev/null)
+            case "$(echo "$v" | awk '{print $1}')" in
+                2*|3*) n=$((n+1)); dn=$(awk -v a="$dn" -v b="$(echo "$v" | awk '{print $2}')" 'BEGIN{print a+b}') ;;
+            esac
+        else
+            n=$((n+1))
+        fi
+        if [ "$DO_UP" = "1" ]; then
             v=$(head -c "$SIZE" /dev/zero | curl -k -s -o /dev/null --max-time 25 $px \
                     --resolve "${HOSTNAME_TEST}:443:${ip}" -X POST --data-binary @- \
                     -w '%{speed_upload}' "https://${HOSTNAME_TEST}${UPPATH}" 2>/dev/null)
@@ -429,9 +457,11 @@ speed_of() {
     fi
 }
 
-echo "--- speed ---"
-if [ "$UPLOAD" = "1" ]; then
+echo "--- speed (${MEASURE}) ---"
+if [ "$MEASURE" = both ]; then
     printf '  %-17s %-10s %-11s %s\n' "address" "conn(ms)" "down kB/s" "up kB/s"
+elif [ "$MEASURE" = upload ]; then
+    printf '  %-17s %-10s %s\n' "address" "conn(ms)" "up kB/s"
 else
     printf '  %-17s %-10s %s\n' "address" "conn(ms)" "down kB/s"
 fi
@@ -446,15 +476,20 @@ while read -r ip ms; do
     # An address that carries nothing is not a slow address, it is a dead one.
     # Printing it or writing it down only adds noise to a list meant to be
     # picked from, so it is dropped and the next candidate is tried instead.
-    if [ "${dn:-0}" = "0" ]; then
+    # Judged on whatever is being measured. In upload-only mode a zero
+    # download is the expected outcome, not a fault.
+    if [ "$DO_DOWN" = "1" ]; then KEY="${dn:-0}"; else KEY="${up:-0}"; fi
+    if [ "$KEY" = "0" ]; then
         DROPPED=$((DROPPED+1))
         printf '\r  ...%d unusable so far, still looking' "$DROPPED"
         continue
     fi
     [ "$DROPPED" -gt 0 ] && printf '\r%*s\r' 50 ''
     FOUND=$((FOUND+1))
-    if [ "$UPLOAD" = "1" ]; then
+    if [ "$MEASURE" = both ]; then
         printf '  %-17s %-10s %-11s %s\n' "$ip" "$ms" "$dn" "$up"
+    elif [ "$MEASURE" = upload ]; then
+        printf '  %-17s %-10s %s\n' "$ip" "$ms" "$up"
     else
         printf '  %-17s %-10s %s\n' "$ip" "$ms" "$dn"
     fi
@@ -467,8 +502,11 @@ done < "$WORK/short.txt"
 
 echo
 FINAL="$WORK/final.txt"
-awk -v s="$MIN_SPEED" -v u="$MIN_UPLOAD" '$3 >= s && $3 > 0 && $4 >= u' "$RESULTS" \
-    | sort -k3,3nr > "$FINAL"
+# Filter on whichever bars apply, and rank on the metric that was asked for.
+if [ "$DO_DOWN" = "1" ]; then SORTKEY=3; else SORTKEY=4; fi
+awk -v s="$MIN_SPEED" -v u="$MIN_UPLOAD" -v d="$DO_DOWN" -v w="$DO_UP" -v k="$SORTKEY" \
+    '(d==0 || ($3 >= s)) && (w==0 || ($4 >= u)) && $k > 0' "$RESULTS" \
+    | sort -k${SORTKEY},${SORTKEY}nr > "$FINAL"
 if [ ! -s "$FINAL" ]; then
     echo "=== nothing qualified ==="
     BEST_D=$(sort -k3,3nr "$RESULTS" | head -1 | awk '{print $3}')
@@ -496,10 +534,12 @@ fi
 
 echo "=== best on $LABEL, fastest first ==="
 head -8 "$FINAL" | while read -r ip ms dn up; do
-    if [ "$UPLOAD" = "1" ]; then
+    if [ "$MEASURE" = both ]; then
         printf '  %-17s  %s kB/s down   %s kB/s up   connect %sms\n' "$ip" "$dn" "$up" "$ms"
+    elif [ "$MEASURE" = upload ]; then
+        printf '  %-17s  %s kB/s up   connect %sms\n' "$ip" "$up" "$ms"
     else
-        printf '  %-17s  %s kB/s   connect %sms\n' "$ip" "$dn" "$ms"
+        printf '  %-17s  %s kB/s down   connect %sms\n' "$ip" "$dn" "$ms"
     fi
 done
 echo
