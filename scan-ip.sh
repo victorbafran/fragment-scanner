@@ -200,6 +200,20 @@ case "$MEASURE" in
 esac
 UPLOAD="$DO_UP"
 
+# Defined up here because bash resolves a function only once it has been read,
+# and calibration runs long before the body of the script.
+nlines() { local n; n=$(grep -c . "$1" 2>/dev/null); echo "${n:-0}"; }
+
+# speed.cloudflare.com takes the size in the path; anything else serves a fixed
+# page. Both are fine for ranking addresses against each other, which is all
+# this needs -- but only the first can be asked for a particular size.
+url_down() {
+    case "$DOWNPATH" in
+        *bytes=) echo "https://${HOSTNAME_TEST}${DOWNPATH}${1:-$SIZE}" ;;
+        *)       echo "https://${HOSTNAME_TEST}${DOWNPATH}" ;;
+    esac
+}
+
 WORK=$(mktemp -d)
 PID=""
 # Belt as well as braces. Each helper stops the xray it started, but a kill
@@ -430,17 +444,6 @@ MIN_UPLOAD="${MIN_UPLOAD:-0}"
 # "|| echo 0" fallback appends a second zero and the result is two lines. It
 # read as a doubled number in the output for a while, and became a hard error
 # the moment one was compared as an integer.
-nlines() { local n; n=$(grep -c . "$1" 2>/dev/null); echo "${n:-0}"; }
-
-# speed.cloudflare.com takes the size in the path; anything else serves a fixed
-# page. Both are fine for ranking addresses against each other, which is all
-# this needs -- but only the first can be asked for a particular size.
-url_down() {
-    case "$DOWNPATH" in
-        *bytes=) echo "https://${HOSTNAME_TEST}${DOWNPATH}${1:-$SIZE}" ;;
-        *)       echo "https://${HOSTNAME_TEST}${DOWNPATH}" ;;
-    esac
-}
 
 rand_ip_in() {
     local cidr="$1" ip bits a b c d base size off n
