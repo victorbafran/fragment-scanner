@@ -523,10 +523,15 @@ while read -r ip ms; do
     RUNNING=$((RUNNING+1))
     if [ "$RUNNING" -ge "$FRONT_PAR" ]; then
         wait; RUNNING=0
-        [ "$(nlines "$FRONTS")" -ge "$NEED" ] && break
+        GOT=$(nlines "$FRONTS")
+        # This pass is slow and silent -- a full TLS request each, sixteen at a
+        # time -- and without a sign of life it reads as a hang.
+        [ -t 1 ] && printf '\r  %d found, %d needed   ' "$GOT" "$NEED"
+        [ "$GOT" -ge "$NEED" ] && break
     fi
 done < "$WORK/byms.txt"
 wait
+[ -t 1 ] && printf '\r%*s\r' 34 ''
 echo "  $(nlines "$FRONTS") of them answer for it"
 if [ ! -s "$FRONTS" ]; then
     echo
