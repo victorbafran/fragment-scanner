@@ -500,7 +500,26 @@ fi
 # ---------- pass 2: does it front the host at all ----------
 # Ten bytes. An address can accept TCP and still serve nothing useful, and
 # finding that out here costs a fraction of a full download.
-echo "--- checking which of them serve $HOSTNAME_TEST ---"
+# When there is a config, ask the question the speed test will ask: does this
+# edge serve *your* site. Checking a stranger's hostname answers a different
+# question, and an edge can pass one and fail the other. Any HTTP reply counts
+# -- even an error proves the edge reached the origin -- because a websocket
+# path answers 400 to an ordinary request and that is still a working edge.
+CHECK_HOST="$HOSTNAME_TEST"
+CHECK_URL="$(url_down 10)"
+CHECK_ANY=0
+if [ -n "$VIA" ]; then
+    OWN=$(echo "$PROXY" | jq -r '.streamSettings.tlsSettings.serverName
+                                 // .streamSettings.wsSettings.headers.Host
+                                 // .streamSettings.wsSettings.host // ""')
+    if [ -n "$OWN" ] && [ "$OWN" != "null" ]; then
+        CHECK_HOST="$OWN"
+        CHECK_URL="https://${OWN}/"
+        CHECK_ANY=1
+    fi
+fi
+
+echo "--- checking which of them serve $CHECK_HOST ---"
 FRONTS="$WORK/fronts.txt"; : > "$FRONTS"
 # Far heavier than a TCP connect -- each one is a full TLS handshake -- so it
 # gets its own, much lower concurrency. Run at the probe's rate on a mobile
@@ -520,10 +539,14 @@ sort -k2,2n "$PROBED" > "$WORK/byms.txt"
 RUNNING=0
 while read -r ip ms; do
     [ -n "${ip:-}" ] || continue
-    ( curl -k -s --tlsv1.2 --max-time 12 -H "Host: $HOSTNAME_TEST" \
-           --resolve "${HOSTNAME_TEST}:443:${ip}" \
-           "$(url_down 10)" -o /dev/null \
-      && echo "$ip $ms" >> "$FRONTS" ) &
+    ( code=$(curl -k -s --tlsv1.2 --max-time 12 -H "Host: $CHECK_HOST" \
+                  --resolve "${CHECK_HOST}:443:${ip}" -o /dev/null \
+                  -w '%{http_code}' "$CHECK_URL" 2>/dev/null)
+      case "${code:-000}" in
+          000) : ;;
+          2*|3*) echo "$ip $ms" >> "$FRONTS" ;;
+          *) [ "$CHECK_ANY" = "1" ] && echo "$ip $ms" >> "$FRONTS" ;;
+      esac ) &
     RUNNING=$((RUNNING+1))
     if [ "$RUNNING" -ge "$FRONT_PAR" ]; then
         wait; RUNNING=0
@@ -537,6 +560,30 @@ done < "$WORK/byms.txt"
 wait
 [ -t 1 ] && printf '\r%*s\r' 34 ''
 echo "  $(nlines "$FRONTS") of them answer for it"
+# Your own hostname failing everywhere usually means it is filtered here, not
+# that the addresses are bad. The generic host answers a weaker question but it
+# still ranks edges, so fall back rather than giving up.
+if [ ! -s "$FRONTS" ] && [ "$CHECK_ANY" = "1" ]; then
+    echo "  none of them -- $CHECK_HOST looks blocked on this network."
+    echo "  Falling back to $HOSTNAME_TEST, which ranks edges but cannot tell"
+    echo "  whether one serves your site in particular."
+    CHECK_HOST="$HOSTNAME_TEST"; CHECK_URL="$(url_down 10)"; CHECK_ANY=0
+    RUNNING=0
+    while read -r ip ms; do
+        [ -n "${ip:-}" ] || continue
+        ( curl -k -s --tlsv1.2 --max-time 12 -H "Host: $CHECK_HOST" \
+               --resolve "${CHECK_HOST}:443:${ip}" -o /dev/null "$CHECK_URL" \
+          && echo "$ip $ms" >> "$FRONTS" ) &
+        RUNNING=$((RUNNING+1))
+        if [ "$RUNNING" -ge "$FRONT_PAR" ]; then
+            wait; RUNNING=0
+            [ "$(nlines "$FRONTS")" -ge "$NEED" ] && break
+        fi
+    done < "$WORK/byms.txt"
+    wait
+    echo "  $(nlines "$FRONTS") of them answer for it"
+fi
+
 if [ ! -s "$FRONTS" ]; then
     echo
     echo "  None served the test host, although $(nlines "$PROBED") answered on 443."
