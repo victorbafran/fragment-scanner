@@ -77,6 +77,8 @@ DOWNPATH="/__down?bytes="
 UPPATH="/__up"
 VIA=""
 DIRECT=0
+CFGPORT=443
+OWN=""
 MASK='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["1-2"],"delays":["0"]}}]}'
 
 # Cloudflare ranges that carry the bulk of its edge and are the ones that turn
@@ -270,6 +272,15 @@ if [ -n "$VIA" ]; then
                    | del(.streamSettings.sockopt, .streamSettings.finalmask)' "$VIA")
     [ -n "$PROXY" ] && [ "$PROXY" != "null" ] || { echo "ABORT: no proxy outbound in $VIA"; exit 1; }
     ORIG_ADDR=$(echo "$PROXY" | jq -r '.settings.vnext[0].address // .settings.address // ""')
+    # The hostname in SNI and Host is what identifies your site to Cloudflare,
+    # and the port is whatever the config connects on. The address field is
+    # only the door it happens to use today, and replacing it is the whole
+    # point -- so nothing is probed or checked against it.
+    CFGPORT=$(echo "$PROXY" | jq -r '.settings.vnext[0].port // .settings.port // 443')
+    OWN=$(echo "$PROXY" | jq -r '.streamSettings.tlsSettings.serverName
+                                 // .streamSettings.wsSettings.headers.Host
+                                 // .streamSettings.wsSettings.host // ""')
+    [ "$OWN" = "null" ] && OWN=""
     if [ -n "$MASK" ]; then
         MJ=$(printf '%s' "$MASK" | jq -c . 2>/dev/null) || MJ=""
         [ -n "$MJ" ] || { echo "ABORT: --mask is not valid JSON"; exit 1; }
@@ -299,13 +310,9 @@ echo "  network label : $LABEL"
 echo "  test host     : $HOSTNAME_TEST"
 if [ -n "$VIA" ]; then
     echo "  measuring     : through the tunnel in $VIA"
-    if [ "$AUTO" = "1" ]; then
-        echo "  its address   : ${ORIG_ADDR:-none} -- calibrated against once, then"
-        echo "                  replaced by each candidate in turn"
-    else
-        echo "  its address   : ${ORIG_ADDR:-none} -- replaced by each candidate,"
-        echo "                  and not used as a reference since the bar is yours"
-    fi
+    echo "  your hostname : ${OWN:-none}"
+    echo "  port          : $CFGPORT"
+    echo "  address field : ${ORIG_ADDR:-none}, replaced by every candidate"
 else
     echo "  measuring     : the Cloudflare edge directly, no tunnel"
 fi
@@ -471,7 +478,7 @@ PROBED="$WORK/probed.txt"; : > "$PROBED"
 probe_one() {
     local ip="$1" t0 t1
     t0=$(date +%s%N 2>/dev/null) || return
-    if timeout 3 bash -c "exec 3<>/dev/tcp/${ip}/443" 2>/dev/null; then
+    if timeout 3 bash -c "exec 3<>/dev/tcp/${ip}/${CFGPORT}" 2>/dev/null; then
         t1=$(date +%s%N)
         echo "$ip $(( (t1 - t0) / 1000000 ))" >> "$PROBED"
     fi
@@ -543,15 +550,10 @@ fi
 CHECK_HOST="$HOSTNAME_TEST"
 CHECK_URL="$(url_down 10)"
 CHECK_ANY=0
-if [ -n "$VIA" ]; then
-    OWN=$(echo "$PROXY" | jq -r '.streamSettings.tlsSettings.serverName
-                                 // .streamSettings.wsSettings.headers.Host
-                                 // .streamSettings.wsSettings.host // ""')
-    if [ -n "$OWN" ] && [ "$OWN" != "null" ]; then
-        CHECK_HOST="$OWN"
-        CHECK_URL="https://${OWN}/cdn-cgi/trace"
-        CHECK_ANY=1
-    fi
+if [ -n "$OWN" ]; then
+    CHECK_HOST="$OWN"
+    CHECK_URL="https://${OWN}/cdn-cgi/trace"
+    CHECK_ANY=1
 fi
 
 echo "--- checking which of them serve $CHECK_HOST ---"
@@ -569,7 +571,7 @@ BATCH=0
 while read -r ip ms; do
     [ -n "${ip:-}" ] || continue
     ( code=$(curl -k -s --tlsv1.2 --max-time 12 -H "Host: $CHECK_HOST" \
-                  --resolve "${CHECK_HOST}:443:${ip}" -o /dev/null \
+                  --resolve "${CHECK_HOST}:${CFGPORT}:${ip}" -o /dev/null \
                   -w '%{http_code}' "$CHECK_URL" 2>/dev/null)
       case "${code:-000}" in
           000) : ;;
@@ -613,7 +615,7 @@ if [ ! -s "$FRONTS" ] && [ "$CHECK_ANY" = "1" ]; then
     while read -r ip ms; do
         [ -n "${ip:-}" ] || continue
         ( curl -k -s --tlsv1.2 --max-time 12 -H "Host: $CHECK_HOST" \
-               --resolve "${CHECK_HOST}:443:${ip}" -o /dev/null "$CHECK_URL" \
+               --resolve "${CHECK_HOST}:${CFGPORT}:${ip}" -o /dev/null "$CHECK_URL" \
           && echo "$ip $ms" >> "$FRONTS" ) &
         RUNNING=$((RUNNING+1))
         if [ "$RUNNING" -ge "$FRONT_PAR" ]; then
@@ -652,7 +654,7 @@ speed_of() {
     for i in $(seq 1 "$TRIALS"); do
         if [ "$DO_DOWN" = "1" ]; then
             v=$(curl -k -s -o /dev/null --max-time 25 $px \
-                     --resolve "${HOSTNAME_TEST}:443:${ip}" \
+                     --resolve "${HOSTNAME_TEST}:${CFGPORT}:${ip}" \
                      -w '%{http_code} %{speed_download}' \
                      "$(url_down)" 2>/dev/null)
             case "$(echo "$v" | awk '{print $1}')" in
@@ -663,7 +665,7 @@ speed_of() {
         fi
         if [ "$DO_UP" = "1" ]; then
             v=$(head -c "$SIZE" /dev/zero | curl -k -s -o /dev/null --max-time 25 $px \
-                    --resolve "${HOSTNAME_TEST}:443:${ip}" -X POST --data-binary @- \
+                    --resolve "${HOSTNAME_TEST}:${CFGPORT}:${ip}" -X POST --data-binary @- \
                     -w '%{speed_upload}' "https://${HOSTNAME_TEST}${UPPATH}" 2>/dev/null)
             up=$(awk -v a="$up" -v b="${v:-0}" 'BEGIN{print a+b}')
         fi
