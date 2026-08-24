@@ -531,10 +531,15 @@ fi
 # Ten bytes. An address can accept TCP and still serve nothing useful, and
 # finding that out here costs a fraction of a full download.
 # When there is a config, ask the question the speed test will ask: does this
-# edge serve *your* site. Checking a stranger's hostname answers a different
-# question, and an edge can pass one and fail the other. Any HTTP reply counts
-# -- even an error proves the edge reached the origin -- because a websocket
-# path answers 400 to an ordinary request and that is still a working edge.
+# edge serve *your* hostname. A stranger's hostname answers a different one,
+# and an edge can pass that and fail this.
+#
+# /cdn-cgi/trace, not the site root. Cloudflare answers that path itself on
+# every proxied hostname, so it proves the edge routes your name without
+# involving your server at all. Asking for / instead hits the websocket
+# endpoint, which receives a request carrying no Upgrade header and simply
+# holds the connection until the timeout -- indistinguishable from the name
+# being blocked, which is exactly how it was misread.
 CHECK_HOST="$HOSTNAME_TEST"
 CHECK_URL="$(url_down 10)"
 CHECK_ANY=0
@@ -544,7 +549,7 @@ if [ -n "$VIA" ]; then
                                  // .streamSettings.wsSettings.host // ""')
     if [ -n "$OWN" ] && [ "$OWN" != "null" ]; then
         CHECK_HOST="$OWN"
-        CHECK_URL="https://${OWN}/"
+        CHECK_URL="https://${OWN}/cdn-cgi/trace"
         CHECK_ANY=1
     fi
 fi
@@ -596,9 +601,13 @@ echo "  $(nlines "$FRONTS") of them answer for it"
 # that the addresses are bad. The generic host answers a weaker question but it
 # still ranks edges, so fall back rather than giving up.
 if [ ! -s "$FRONTS" ] && [ "$CHECK_ANY" = "1" ]; then
-    echo "  none of them -- $CHECK_HOST looks blocked on this network."
+    echo "  none of them, which does not mean $CHECK_HOST is blocked."
+    echo "  This check uses curl, and some networks drop a handshake by its shape"
+    echo "  rather than by the name in it -- a config with a browser fingerprint"
+    echo "  reaches the same host on the same network where curl cannot. Measured"
+    echo "  here: xray with fingerprint=chrome got through, plain curl did not."
     echo "  Falling back to $HOSTNAME_TEST, which ranks edges but cannot tell"
-    echo "  whether one serves your site in particular."
+    echo "  whether one serves your hostname in particular."
     CHECK_HOST="$HOSTNAME_TEST"; CHECK_URL="$(url_down 10)"; CHECK_ANY=0
     RUNNING=0
     while read -r ip ms; do
