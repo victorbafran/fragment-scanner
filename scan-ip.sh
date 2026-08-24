@@ -204,6 +204,15 @@ UPLOAD="$DO_UP"
 # and calibration runs long before the body of the script.
 nlines() { local n; n=$(grep -c . "$1" 2>/dev/null); echo "${n:-0}"; }
 
+# A pool, not a workload: the speed test walks it from the top and stops as
+# soon as it has TOP working addresses, usually long before the pool runs out.
+# The margin is for the ones that pass the middle pass and still carry nothing
+# through the tunnel, or land under the bar. Measured attrition on these
+# networks is 20-30%, so double covers it. Defined here because both earlier
+# passes size themselves against it.
+NEED=$(( TOP * 2 ))
+[ "$NEED" -lt 10 ] && NEED=10
+
 # speed.cloudflare.com takes the size in the path; anything else serves a fixed
 # page. Both are fine for ranking addresses against each other, which is all
 # this needs -- but only the first can be asked for a particular size.
@@ -467,15 +476,36 @@ probe_one() {
         echo "$ip $(( (t1 - t0) / 1000000 ))" >> "$PROBED"
     fi
 }
+# Addresses are drawn a round at a time -- one from each range, then again --
+# rather than all of one range before the next. Stopping early then still
+# leaves an even spread; the old order would have meant a short run never
+# looking past the first range at all.
+CAND="$WORK/cand.txt"; : > "$CAND"
+i=0
+while [ "$i" -lt "$SAMPLE" ]; do
+    while IFS= read -r cidr; do
+        [ -n "$cidr" ] && rand_ip_in "$cidr" >> "$CAND"
+    done <<< "$RANGE_LIST"
+    i=$((i+1))
+done
+
+# Enough live addresses to feed the next pass, not every address there is.
+# Roughly a third of what answers here goes on to serve the host, so five
+# times the candidate target is a comfortable margin -- and on a wide sample
+# it is the difference between forty batches and four.
+ALIVE_TARGET=$(( NEED * 5 ))
+[ "$ALIVE_TARGET" -lt 40 ] && ALIVE_TARGET=40
+
 COUNT=0; RUNNING=0
-while IFS= read -r cidr; do
-    [ -n "$cidr" ] || continue
-    for _ in $(seq 1 "$SAMPLE"); do
-        probe_one "$(rand_ip_in "$cidr")" &
-        RUNNING=$((RUNNING+1)); COUNT=$((COUNT+1))
-        [ "$RUNNING" -ge "$PARALLEL" ] && { wait; RUNNING=0; printf '.'; }
-    done
-done <<< "$RANGE_LIST"
+while IFS= read -r ip; do
+    [ -n "$ip" ] || continue
+    probe_one "$ip" &
+    RUNNING=$((RUNNING+1)); COUNT=$((COUNT+1))
+    if [ "$RUNNING" -ge "$PARALLEL" ]; then
+        wait; RUNNING=0; printf '.'
+        [ "$(nlines "$PROBED")" -ge "$ALIVE_TARGET" ] && break
+    fi
+done < "$CAND"
 wait; echo
 echo "  $COUNT probed, $(nlines "$PROBED") answered"
 [ -s "$PROBED" ] || { echo; echo "  Nothing answered. This network blocks the range on 443, or you are offline."; exit 1; }
@@ -528,15 +558,9 @@ FRONTS="$WORK/fronts.txt"; : > "$FRONTS"
 # request answers in about two seconds.
 FRONT_PAR="$PARALLEL"
 [ "$FRONT_PAR" -gt 16 ] && FRONT_PAR=16
-# A pool, not a workload: the speed test walks it from the top and stops as
-# soon as it has TOP working addresses, usually long before the pool runs out.
-# The margin is for the ones that pass here and still carry nothing through
-# the tunnel, or land under the bar. Measured attrition on these networks is
-# 20-30%, so double is enough -- triple only made the slow pass longer.
-NEED=$(( TOP * 2 ))
-[ "$NEED" -lt 10 ] && NEED=10
 sort -k2,2n "$PROBED" > "$WORK/byms.txt"
 RUNNING=0
+BATCH=0
 while read -r ip ms; do
     [ -n "${ip:-}" ] || continue
     ( code=$(curl -k -s --tlsv1.2 --max-time 12 -H "Host: $CHECK_HOST" \
@@ -550,11 +574,19 @@ while read -r ip ms; do
     RUNNING=$((RUNNING+1))
     if [ "$RUNNING" -ge "$FRONT_PAR" ]; then
         wait; RUNNING=0
+        BATCH=$((BATCH+1))
         GOT=$(nlines "$FRONTS")
         # This pass is slow and silent -- a full TLS request each, sixteen at a
         # time -- and without a sign of life it reads as a hang.
         [ -t 1 ] && printf '\r  %d found, %d needed   ' "$GOT" "$NEED"
         [ "$GOT" -ge "$NEED" ] && break
+        # Two full batches of your own hostname answering nothing means it is
+        # blocked here, not that these particular addresses are bad. Grinding
+        # through the rest at twelve seconds apiece only delays the fallback.
+        if [ "$CHECK_ANY" = "1" ] && [ "$GOT" = "0" ] && [ "$BATCH" -ge 2 ]; then
+            [ -t 1 ] && printf '\r%*s\r' 34 ''
+            break
+        fi
     fi
 done < "$WORK/byms.txt"
 wait
