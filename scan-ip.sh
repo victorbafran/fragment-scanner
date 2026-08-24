@@ -509,9 +509,13 @@ FRONTS="$WORK/fronts.txt"; : > "$FRONTS"
 # request answers in about two seconds.
 FRONT_PAR="$PARALLEL"
 [ "$FRONT_PAR" -gt 16 ] && FRONT_PAR=16
-# No point checking hundreds when only a few are ever speed-tested. Best
-# connect times first, and stop once there are comfortably enough.
-NEED=$(( TOP * 3 ))
+# A pool, not a workload: the speed test walks it from the top and stops as
+# soon as it has TOP working addresses, usually long before the pool runs out.
+# The margin is for the ones that pass here and still carry nothing through
+# the tunnel, or land under the bar. Measured attrition on these networks is
+# 20-30%, so double is enough -- triple only made the slow pass longer.
+NEED=$(( TOP * 2 ))
+[ "$NEED" -lt 10 ] && NEED=10
 sort -k2,2n "$PROBED" > "$WORK/byms.txt"
 RUNNING=0
 while read -r ip ms; do
