@@ -293,10 +293,17 @@ fi
 done
 if [ -n "$RANGES" ]; then
     if [ -f "$RANGES" ]; then
-        RANGE_LIST=$(sed 's/#.*//' "$RANGES" | tr -d '\r' | grep -oE '[0-9.]+/[0-9]+')
+        # A bare address counts as a /32. That is what lets a list of specific
+        # addresses -- from another scanner, or ones that worked before -- be
+        # dropped straight in and speed-tested, instead of only ever sampling
+        # blindly out of a range.
+        RANGE_LIST=$(sed 's/#.*//' "$RANGES" | tr -d '\r' \
+                     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?' \
+                     | sed 's|^\([0-9.]*\)$|\1/32|')
         RANGE_SRC="$RANGES"
     else
-        RANGE_LIST=$(printf '%s' "$RANGES" | tr ',' '\n' | tr -d ' ' | grep .)
+        RANGE_LIST=$(printf '%s' "$RANGES" | tr ',' '\n' | tr -d ' ' | grep . \
+                     | sed 's|^\([0-9.]*\)$|\1/32|')
         RANGE_SRC="the command line"
     fi
 else
@@ -495,6 +502,9 @@ while [ "$i" -lt "$SAMPLE" ]; do
     done <<< "$RANGE_LIST"
     i=$((i+1))
 done
+# A /32 yields the same address on every round, so a list of specific
+# addresses would otherwise be probed sample times over.
+awk '!seen[$0]++' "$CAND" > "$CAND.u" && mv "$CAND.u" "$CAND"
 
 # Enough live addresses to feed the next pass, not every address there is.
 # Roughly a third of what answers here goes on to serve the host, so five
